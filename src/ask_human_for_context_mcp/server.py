@@ -1,6 +1,7 @@
 import asyncio
-import subprocess
+import os
 import platform
+import subprocess
 from typing import Any, Optional
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
@@ -12,6 +13,21 @@ import uvicorn
 
 # Initialize FastMCP server for User Prompt tools
 mcp = FastMCP("ask-human-for-context")
+
+DEFAULT_DIALOG_TITLE = "🤖 Cursor AI Assistant"
+DIALOG_TITLE_ENV_VAR = "ASK_HUMAN_DIALOG_TITLE"
+
+
+def resolve_dialog_title(dialog_title: Optional[str] = None) -> str:
+    """Resolve the dialog title from CLI input, env var, or default."""
+    if dialog_title and dialog_title.strip():
+        return dialog_title.strip()
+
+    env_title = os.getenv(DIALOG_TITLE_ENV_VAR, "")
+    if env_title.strip():
+        return env_title.strip()
+
+    return DEFAULT_DIALOG_TITLE
 
 
 # Custom exception classes for better error handling (Task 1.4)
@@ -37,9 +53,10 @@ class GUIDialogHandler:
     Falls back to terminal input if GUI is unavailable.
     """
 
-    def __init__(self):
+    def __init__(self, dialog_title: Optional[str] = None):
         """Initialize the dialog handler with platform detection."""
         self.platform = platform.system()
+        self.dialog_title = resolve_dialog_title(dialog_title)
 
     async def get_user_input(self, question: str, timeout: int = 1200) -> Optional[str]:
         """Get user input via native GUI dialog with timeout.
@@ -73,8 +90,6 @@ class GUIDialogHandler:
         """macOS dialog using osascript with custom Cursor icon."""
         
         # Use the custom Cursor icon from assets folder
-        import os
-        
         # Use absolute path to the icon file - more reliable than path calculation
         cursor_icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "assets", "cursor-icon.icns")
         
@@ -87,7 +102,7 @@ class GUIDialogHandler:
         script = f'''
         display dialog "{self._escape_for_applescript(question)}" ¬
         default answer "" ¬
-        with title "🤖 Cursor AI Assistant" ¬
+        with title "{self._escape_for_applescript(self.dialog_title)}" ¬
         {icon_clause} ¬
         giving up after {timeout}
         '''
@@ -128,7 +143,7 @@ class GUIDialogHandler:
         
         cmd = [
             "zenity", "--entry",
-            "--title=🤖 Cursor AI Assistant",
+            f"--title={self.dialog_title}",
             f"--text={question}",
             f"--timeout={timeout}",
         ] + icon_args
@@ -153,7 +168,6 @@ class GUIDialogHandler:
         try:
             import tkinter as tk
             from tkinter import simpledialog
-            import os
             
             # Create a simple dialog using tkinter
             root = tk.Tk()
@@ -162,7 +176,7 @@ class GUIDialogHandler:
             # Try to set custom icon from PNG (converted to ICO)
             self._set_windows_icon(root)
             
-            result = simpledialog.askstring("🤖 Cursor AI Assistant", question)
+            result = simpledialog.askstring(self.dialog_title, question)
             root.destroy()
             
             return result
@@ -427,7 +441,18 @@ def main():
     # Port configuration for SSE mode
     parser.add_argument('--port', type=int, default=8080, 
                         help='Port to listen on (for SSE mode)')
+    parser.add_argument(
+        '--dialog-title',
+        default=None,
+        help=(
+            'Dialog window title. Defaults to the '
+            f'{DIALOG_TITLE_ENV_VAR} environment variable or the built-in title.'
+        ),
+    )
     args = parser.parse_args()
+
+    global dialog_handler
+    dialog_handler = GUIDialogHandler(dialog_title=args.dialog_title)
 
     # Launch the server with the selected transport mode
     if args.transport == 'stdio':

@@ -316,6 +316,25 @@ ask-human-for-context-mcp/
 - **UI/UX choices**: "Modal dialog or inline editing for this form?"
 - **Technology selection**: "Which CSS framework fits your preferences?"
 
+### Usage with Codex
+
+After installing with `pip`, add the MCP server to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.ask-human-for-context]
+command = "ask-human-for-context-mcp"
+args = ["--transport", "stdio", "--dialog-title", "Codex Needs Input"]
+tool_timeout_sec = 1200
+```
+
+and teach Codex when to use it by adding a rule to `~/.codex/AGENTS.md`, for example:
+
+```md
+If a required fact or preference cannot be discovered locally and a wrong assumption could affect correctness, safety, or design decisions, use `ask-human-for-context` tool before proceeding.
+```
+
+Don't forget to restart a Codex session so it picks up the new MCP server configuration.
+
 ## 🔒 Security & Privacy
 
 - **Local execution**: All dialogs run locally on your machine
