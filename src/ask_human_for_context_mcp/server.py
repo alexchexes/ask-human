@@ -69,6 +69,44 @@ class GUIDialogHandler:
             # Don't fall back to terminal in MCP context - just report the error
             raise UserPromptError(f"GUI dialog failed: {e}. Ensure osascript (macOS), zenity (Linux), or tkinter (Windows) is available.")
 
+    def _enable_windows_dpi_awareness(self) -> None:
+        """Enable crisp rendering for Windows dialogs on scaled displays."""
+        try:
+            import ctypes
+
+            try:
+                # Prefer per-monitor awareness on modern Windows versions.
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)
+                return
+            except Exception:
+                pass
+
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _configure_windows_tk_scaling(self, root) -> None:
+        """Match Tk scaling to the current monitor DPI when available."""
+        try:
+            import ctypes
+
+            dpi = 0
+            try:
+                dpi = ctypes.windll.user32.GetDpiForWindow(root.winfo_id())
+            except Exception:
+                try:
+                    dpi = root.winfo_fpixels("1i")
+                except Exception:
+                    dpi = 0
+
+            if dpi:
+                root.tk.call("tk", "scaling", float(dpi) / 72.0)
+        except Exception:
+            pass
+
     async def _macos_dialog(self, question: str, timeout: int) -> Optional[str]:
         """macOS dialog using osascript with custom Cursor icon."""
         
@@ -153,10 +191,12 @@ class GUIDialogHandler:
         try:
             import tkinter as tk
             from tkinter import simpledialog
-            import os
-            
+
+            self._enable_windows_dpi_awareness()
+
             # Create a simple dialog using tkinter
             root = tk.Tk()
+            self._configure_windows_tk_scaling(root)
             root.withdraw()  # Hide the main window
             
             # Try to set custom icon from PNG (converted to ICO)
