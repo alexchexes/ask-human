@@ -1,5 +1,4 @@
 import asyncio
-import os
 import platform
 import subprocess
 from typing import Any, Optional
@@ -15,17 +14,12 @@ import uvicorn
 mcp = FastMCP("ask-human-for-context")
 
 DEFAULT_DIALOG_TITLE = "🤖 Cursor AI Assistant"
-DIALOG_TITLE_ENV_VAR = "ASK_HUMAN_DIALOG_TITLE"
 
 
 def resolve_dialog_title(dialog_title: Optional[str] = None) -> str:
-    """Resolve the dialog title from CLI input, env var, or default."""
+    """Resolve the dialog title from CLI input or default."""
     if dialog_title and dialog_title.strip():
         return dialog_title.strip()
-
-    env_title = os.getenv(DIALOG_TITLE_ENV_VAR, "")
-    if env_title.strip():
-        return env_title.strip()
 
     return DEFAULT_DIALOG_TITLE
 
@@ -444,10 +438,7 @@ def main():
     parser.add_argument(
         '--dialog-title',
         default=None,
-        help=(
-            'Dialog window title. Defaults to the '
-            f'{DIALOG_TITLE_ENV_VAR} environment variable or the built-in title.'
-        ),
+        help='Dialog window title. Defaults to the built-in title.',
     )
     args = parser.parse_args()
 

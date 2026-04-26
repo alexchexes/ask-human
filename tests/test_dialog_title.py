@@ -5,40 +5,25 @@ import sys
 
 from ask_human_for_context_mcp.server import (
     DEFAULT_DIALOG_TITLE,
-    DIALOG_TITLE_ENV_VAR,
     GUIDialogHandler,
     resolve_dialog_title,
 )
 
 
-def test_resolve_dialog_title_defaults(monkeypatch):
+def test_resolve_dialog_title_defaults():
     """Use the built-in title when no override is present."""
-    monkeypatch.delenv(DIALOG_TITLE_ENV_VAR, raising=False)
-
     assert resolve_dialog_title() == DEFAULT_DIALOG_TITLE
 
 
-def test_resolve_dialog_title_uses_env(monkeypatch):
-    """Use the environment variable when set."""
-    monkeypatch.setenv(DIALOG_TITLE_ENV_VAR, "My Persistent Title")
-
-    assert resolve_dialog_title() == "My Persistent Title"
-
-
-def test_resolve_dialog_title_prefers_explicit_value(monkeypatch):
-    """Prefer the explicit startup option over the environment variable."""
-    monkeypatch.setenv(DIALOG_TITLE_ENV_VAR, "Env Title")
-
+def test_resolve_dialog_title_uses_explicit_value():
+    """Use the explicit startup option when provided."""
     assert resolve_dialog_title("CLI Title") == "CLI Title"
 
 
-def test_handler_uses_resolved_dialog_title(monkeypatch):
+def test_handler_uses_resolved_dialog_title():
     """Initialize handlers with the resolved title."""
-    monkeypatch.setenv(DIALOG_TITLE_ENV_VAR, "Env Title")
-
-    handler = GUIDialogHandler()
-
-    assert handler.dialog_title == "Env Title"
+    assert GUIDialogHandler().dialog_title == DEFAULT_DIALOG_TITLE
+    assert GUIDialogHandler("Custom Title").dialog_title == "Custom Title"
 
 
 def test_help_mentions_dialog_title_option():
