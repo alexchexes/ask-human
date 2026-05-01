@@ -97,11 +97,11 @@ Your response gets sent back to the AI to continue the workflow.
 
 ### Cross-Platform Native Dialogs
 
-| Platform    | Technology  | Features                              |
-| ----------- | ----------- | ------------------------------------- |
-| **macOS**   | `osascript` | Custom Cursor icon, 90-second timeout |
-| **Linux**   | `zenity`    | Custom window icon, proper styling    |
-| **Windows** | `tkinter`   | Native Windows dialogs                |
+| Platform    | Technology  | Features               |
+| ----------- | ----------- | ---------------------- |
+| **macOS**   | `osascript` | Custom Cursor icon     |
+| **Linux**   | `zenity`    | Custom window icon     |
+| **Windows** | `tkinter`   | Native Windows dialogs |
 
 ### Automatic Fallbacks
 
@@ -223,9 +223,19 @@ ask-human-for-context-mcp --transport sse --host 0.0.0.0 --port 8080
 
 ### Timeout Settings
 
-- **Default timeout**: 90 seconds (1.5 minutes)
-- **Configurable range**: 30 seconds to 2 hours
+- **Default timeout**: 120 seconds (2 minutes)
+- **Configurable**: Use any positive number of seconds
+- **CLI option**: Use `--timeout-seconds` to configure the dialog response timeout
 - **User-friendly**: Shows timeout in minutes for better UX
+
+MCP clients may also enforce their own tool-call timeout. Cursor's MCP
+configuration does not currently document a per-server timeout option, and
+Cursor versions have been reported to time out long-running MCP calls in roughly
+one to two minutes. In clients that do support configuring this, set the
+client-side timeout to at least the same value as `--timeout-seconds`; otherwise
+the client can stop waiting before this server closes the dialog. In Codex,
+configure `tool_timeout_sec = <seconds>` under
+`[mcp_servers.ask-human-for-context]` in `config.toml`.
 
 ## 🔍 Tool Reference
 

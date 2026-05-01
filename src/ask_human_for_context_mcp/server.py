@@ -1,7 +1,7 @@
 import asyncio
 import subprocess
 import platform
-from typing import Any, Optional
+from typing import Any, Optional, cast
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from mcp.server.sse import SseServerTransport
@@ -12,6 +12,8 @@ import uvicorn
 
 # Initialize FastMCP server for User Prompt tools
 mcp = FastMCP("ask-human-for-context")
+
+DEFAULT_DIALOG_TIMEOUT_SECONDS = 120
 
 
 # Custom exception classes for better error handling (Task 1.4)
@@ -37,16 +39,18 @@ class GUIDialogHandler:
     Falls back to terminal input if GUI is unavailable.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the dialog handler with platform detection."""
         self.platform = platform.system()
 
-    async def get_user_input(self, question: str, timeout: int = 1200) -> Optional[str]:
+    async def get_user_input(
+        self, question: str, timeout: int = DEFAULT_DIALOG_TIMEOUT_SECONDS
+    ) -> Optional[str]:
         """Get user input via native GUI dialog with timeout.
         
         Args:
             question: The question to ask the user
-            timeout: Timeout in seconds (default: 1200 = 20 minutes)
+            timeout: Timeout in seconds
             
         Returns:
             The user's response as a string, or None if timeout/cancelled
@@ -88,7 +92,7 @@ class GUIDialogHandler:
         except Exception:
             pass
 
-    def _configure_windows_tk_scaling(self, root) -> None:
+    def _configure_windows_tk_scaling(self, root: Any) -> None:
         """Match Tk scaling to the current monitor DPI when available."""
         try:
             import ctypes
@@ -188,6 +192,7 @@ class GUIDialogHandler:
 
     async def _windows_dialog(self, question: str, timeout: int) -> Optional[str]:
         """Windows dialog using tkinter with custom Cursor logo."""
+        root = None
         try:
             import tkinter as tk
             from tkinter import simpledialog
@@ -201,13 +206,40 @@ class GUIDialogHandler:
             
             # Try to set custom icon from PNG (converted to ICO)
             self._set_windows_icon(root)
-            
-            result = simpledialog.askstring("🤖 Cursor AI Assistant", question)
-            root.destroy()
-            
-            return result
+
+            return self._ask_windows_string(
+                root,
+                simpledialog,
+                "🤖 Cursor AI Assistant",
+                question,
+                timeout,
+            )
         except Exception:
             return None
+        finally:
+            if root is not None:
+                try:
+                    root.destroy()
+                except Exception:
+                    pass
+
+    def _ask_windows_string(
+        self,
+        root: Any,
+        simpledialog: Any,
+        title: str,
+        question: str,
+        timeout: int,
+    ) -> Optional[str]:
+        """Ask for a Windows string response and close it when timeout expires."""
+        timeout_id = root.after(timeout * 1000, root.destroy)
+        try:
+            return cast(Optional[str], simpledialog.askstring(title, question, parent=root))
+        finally:
+            try:
+                root.after_cancel(timeout_id)
+            except Exception:
+                pass
 
     def _escape_for_applescript(self, text: str) -> str:
         """Escape text for AppleScript."""
@@ -260,7 +292,7 @@ class GUIDialogHandler:
         # Fall back to built-in question icon
         return ["--question"]
 
-    def _set_windows_icon(self, root) -> None:
+    def _set_windows_icon(self, root: Any) -> None:
         """Set icon for Windows tkinter dialog with custom Cursor logo."""
         import os
         
@@ -288,6 +320,7 @@ class GUIDialogHandler:
 
 # Global dialog handler instance
 dialog_handler = GUIDialogHandler()
+dialog_timeout_seconds = DEFAULT_DIALOG_TIMEOUT_SECONDS
 
 
 @mcp.tool()
@@ -319,7 +352,7 @@ async def asking_user_missing_context(
         ValueError: If parameters are invalid or out of acceptable ranges
     """
 
-    timeout_seconds = 90 # 1.5 minutes
+    timeout_seconds = dialog_timeout_seconds
     
     # Parameter validation with clear error messages
     if not question or not isinstance(question, str):
@@ -334,11 +367,8 @@ async def asking_user_missing_context(
     if not isinstance(timeout_seconds, int):
         return "❌ Error: 'timeout_seconds' must be an integer"
     
-    if timeout_seconds < 30:
-        return "❌ Error: 'timeout_seconds' must be at least 30 seconds for usability"
-    
-    if timeout_seconds > 7200:  # 2 hours max
-        return "❌ Error: 'timeout_seconds' cannot exceed 7200 seconds (2 hours) to prevent indefinite hanging"
+    if timeout_seconds < 1:
+        return "❌ Error: 'timeout_seconds' must be at least 1 second"
     
     if not isinstance(context, str):
         return "❌ Error: 'context' must be a string (use empty string if no context needed)"
@@ -445,7 +475,7 @@ def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlett
     )
 
 
-def main():
+def main() -> None:
     """Main entry point for the User Prompt MCP server.
     
     This function serves as the primary entry point when the server is launched
@@ -467,7 +497,19 @@ def main():
     # Port configuration for SSE mode
     parser.add_argument('--port', type=int, default=8080, 
                         help='Port to listen on (for SSE mode)')
+    parser.add_argument(
+        '--timeout-seconds',
+        type=int,
+        default=DEFAULT_DIALOG_TIMEOUT_SECONDS,
+        help=(
+            'Dialog response timeout in seconds. Defaults to '
+            f'{DEFAULT_DIALOG_TIMEOUT_SECONDS} seconds.'
+        ),
+    )
     args = parser.parse_args()
+
+    global dialog_timeout_seconds
+    dialog_timeout_seconds = args.timeout_seconds
 
     # Launch the server with the selected transport mode
     if args.transport == 'stdio':

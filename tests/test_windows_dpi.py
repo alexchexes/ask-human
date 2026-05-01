@@ -66,6 +66,13 @@ def test_windows_dialog_applies_dpi_setup(monkeypatch):
     events = []
 
     class FakeRoot:
+        def after(self, delay_ms, callback):
+            events.append(("after", delay_ms, callback))
+            return "timeout-id"
+
+        def after_cancel(self, timeout_id):
+            events.append(("after-cancel", timeout_id))
+
         def withdraw(self):
             events.append("withdraw")
 
@@ -77,7 +84,10 @@ def test_windows_dialog_applies_dpi_setup(monkeypatch):
     fake_tk = types.ModuleType("tkinter")
     fake_tk.Tk = lambda: fake_root
     fake_tk.simpledialog = types.SimpleNamespace(
-        askstring=lambda title, question: events.append(("askstring", title, question)) or "ok"
+        askstring=lambda title, question, parent=None: events.append(
+            ("askstring", title, question, parent)
+        )
+        or "ok"
     )
 
     monkeypatch.setitem(sys.modules, "tkinter", fake_tk)
@@ -99,6 +109,8 @@ def test_windows_dialog_applies_dpi_setup(monkeypatch):
         ("scale", fake_root),
         "withdraw",
         ("icon", fake_root),
-        ("askstring", "🤖 Cursor AI Assistant", "Question?"),
+        ("after", 10000, fake_root.destroy),
+        ("askstring", "🤖 Cursor AI Assistant", "Question?", fake_root),
+        ("after-cancel", "timeout-id"),
         "destroy",
     ]
