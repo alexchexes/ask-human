@@ -84,6 +84,8 @@ class GUIDialogHandler:
         """macOS dialog using osascript with custom Cursor icon."""
         
         # Use the custom Cursor icon from assets folder
+        import os
+
         # Use absolute path to the icon file - more reliable than path calculation
         cursor_icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "assets", "cursor-icon.icns")
         
