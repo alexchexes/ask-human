@@ -436,24 +436,24 @@ async def asking_user_missing_context(question: str, context: str = "") -> str:
         # Format question with context for better user experience
         if show_timing_info and context.strip():
             full_question = (
-                f"Context:\n{context.strip()}\n\n"
+                f"📋 Context:\n{context.strip()}\n\n"
                 f"{separator}\n\n"
-                f"Question:\n{question.strip()}\n\n"
+                f"❓ Question:\n{question.strip()}\n\n"
                 f"{separator}\n\n"
                 f"{build_timing_info_block(dt.datetime.now().astimezone(), timeout_seconds)}"
             )
         elif show_timing_info:
             full_question = (
-                f"Question:\n{question.strip()}\n\n"
+                f"❓ Question:\n{question.strip()}\n\n"
                 f"{separator}\n\n"
                 f"{build_timing_info_block(dt.datetime.now().astimezone(), timeout_seconds)}"
             )
         elif context.strip():
             # Format context clearly with visual separation
-            formatted_context = f"📋 Missing Context:\n{context.strip()}\n"
+            formatted_context = f"📋 Context:\n{context.strip()}\n"
             full_question = f"{formatted_context}\n{separator}\n\n❓ Question:\n{question.strip()}"
         else:
-            full_question = f"❓ {question.strip()}"
+            full_question = f"❓ Question:\n{question.strip()}"
 
         # Get user input via GUI dialog with timeout
         response = await dialog_handler.get_user_input(full_question, timeout_seconds)

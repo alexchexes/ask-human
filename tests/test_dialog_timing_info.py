@@ -47,7 +47,7 @@ def test_tool_keeps_default_prompt_shape_without_timing_info(monkeypatch):
 
     assert result == "✅ User response: ok"
     assert stub.timeout == server.DEFAULT_DIALOG_TIMEOUT_SECONDS
-    assert stub.question == "❓ Question?"
+    assert stub.question == "❓ Question:\nQuestion?"
 
 
 def test_initialize_time_locale_uses_system_default(monkeypatch):
@@ -115,11 +115,36 @@ def test_tool_appends_timing_info_when_enabled(monkeypatch):
     assert result == "✅ User response: ok"
     separator = "─" * 40
     assert stub.question == (
-        "Context:\n"
+        "📋 Context:\n"
         "There are two valid implementation paths and the choice is user-facing.\n\n"
         f"{separator}\n\n"
-        "Question:\n"
+        "❓ Question:\n"
         "Should I keep the current API shape?\n\n"
+        f"{separator}\n\n"
+        "Issued at: 10.05.2026 09:30:00 | Answer until: 10.05.2026 09:31:30 "
+        "(client may time out sooner)"
+    )
+
+
+def test_tool_uses_consistent_question_label_without_context(monkeypatch):
+    """Keep the Question label consistent when timing info is enabled without context."""
+    stub = StubDialogHandler()
+    monkeypatch.setattr(server, "dialog_handler", stub)
+    monkeypatch.setattr(server, "show_timing_info", True)
+    monkeypatch.setattr(
+        server,
+        "build_timing_info_block",
+        lambda issued_at, timeout_seconds: "Issued at: 10.05.2026 09:30:00 | "
+        "Answer until: 10.05.2026 09:31:30 (client may time out sooner)",
+    )
+
+    result = asyncio.run(server.asking_user_missing_context("Question without context?"))
+
+    assert result == "✅ User response: ok"
+    separator = "─" * 40
+    assert stub.question == (
+        "❓ Question:\n"
+        "Question without context?\n\n"
         f"{separator}\n\n"
         "Issued at: 10.05.2026 09:30:00 | Answer until: 10.05.2026 09:31:30 "
         "(client may time out sooner)"
