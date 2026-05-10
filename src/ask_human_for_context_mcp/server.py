@@ -1,5 +1,4 @@
 import asyncio
-import subprocess
 import platform
 from typing import Any, Optional, cast
 from mcp.server.fastmcp import FastMCP
@@ -14,6 +13,15 @@ import uvicorn
 mcp = FastMCP("ask-human-for-context")
 
 DEFAULT_DIALOG_TIMEOUT_SECONDS = 120
+DEFAULT_DIALOG_TITLE = "🤖 Cursor AI Assistant"
+
+
+def resolve_dialog_title(dialog_title: Optional[str] = None) -> str:
+    """Resolve the dialog title from CLI input or default."""
+    if dialog_title and dialog_title.strip():
+        return dialog_title.strip()
+
+    return DEFAULT_DIALOG_TITLE
 
 
 # Custom exception classes for better error handling (Task 1.4)
@@ -39,9 +47,10 @@ class GUIDialogHandler:
     Falls back to terminal input if GUI is unavailable.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, dialog_title: Optional[str] = None) -> None:
         """Initialize the dialog handler with platform detection."""
         self.platform = platform.system()
+        self.dialog_title = resolve_dialog_title(dialog_title)
 
     async def get_user_input(
         self, question: str, timeout: int = DEFAULT_DIALOG_TIMEOUT_SECONDS
@@ -115,8 +124,6 @@ class GUIDialogHandler:
         """macOS dialog using osascript with custom Cursor icon."""
         
         # Use the custom Cursor icon from assets folder
-        import os
-        
         # Use absolute path to the icon file - more reliable than path calculation
         cursor_icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "assets", "cursor-icon.icns")
         
@@ -129,7 +136,7 @@ class GUIDialogHandler:
         script = f'''
         display dialog "{self._escape_for_applescript(question)}" ¬
         default answer "" ¬
-        with title "🤖 Cursor AI Assistant" ¬
+        with title "{self._escape_for_applescript(self.dialog_title)}" ¬
         {icon_clause} ¬
         giving up after {timeout}
         '''
@@ -170,7 +177,7 @@ class GUIDialogHandler:
         
         cmd = [
             "zenity", "--entry",
-            "--title=🤖 Cursor AI Assistant",
+            f"--title={self.dialog_title}",
             f"--text={question}",
             f"--timeout={timeout}",
         ] + icon_args
@@ -198,7 +205,6 @@ class GUIDialogHandler:
             from tkinter import simpledialog
 
             self._enable_windows_dpi_awareness()
-
             # Create a simple dialog using tkinter
             root = tk.Tk()
             self._configure_windows_tk_scaling(root)
@@ -210,7 +216,7 @@ class GUIDialogHandler:
             return self._ask_windows_string(
                 root,
                 simpledialog,
-                "🤖 Cursor AI Assistant",
+                self.dialog_title,
                 question,
                 timeout,
             )
@@ -506,9 +512,16 @@ def main() -> None:
             f'{DEFAULT_DIALOG_TIMEOUT_SECONDS} seconds.'
         ),
     )
+    parser.add_argument(
+        '--dialog-title',
+        default=None,
+        help='Dialog window title. Defaults to the built-in title.',
+    )
     args = parser.parse_args()
 
+    global dialog_handler
     global dialog_timeout_seconds
+    dialog_handler = GUIDialogHandler(dialog_title=args.dialog_title)
     dialog_timeout_seconds = args.timeout_seconds
 
     # Launch the server with the selected transport mode
