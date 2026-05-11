@@ -3,8 +3,9 @@
 import asyncio
 import datetime as dt
 import sys
+from typing import cast
 
-from ask_human_for_context_mcp import server
+from ask_human_for_context_mcp import prompt_formatting, server
 
 
 class StubDialogHandler:
@@ -23,12 +24,12 @@ class StubDialogHandler:
 def test_build_timing_info_block_contains_note(monkeypatch):
     """Include both timestamps and the external-timeout note."""
     monkeypatch.setattr(
-        server,
+        prompt_formatting,
         "format_dialog_timestamp",
         lambda moment: moment.strftime("%d.%m.%Y %H:%M:%S"),
     )
 
-    block = server.build_timing_info_block(dt.datetime(2026, 5, 10, 9, 30, 0), 90)
+    block = prompt_formatting.build_timing_info_block(dt.datetime(2026, 5, 10, 9, 30, 0), 90)
 
     assert block == (
         "Issued at: 10.05.2026 09:30:00"
@@ -55,14 +56,14 @@ def test_initialize_time_locale_uses_system_default(monkeypatch):
     calls = []
 
     monkeypatch.setattr(
-        server.locale,
+        prompt_formatting.locale,
         "setlocale",
         lambda category, value=None: calls.append((category, value)) or "ok",
     )
 
-    server.initialize_time_locale()
+    prompt_formatting.initialize_time_locale()
 
-    assert calls == [(server.locale.LC_TIME, "")]
+    assert calls == [(prompt_formatting.locale.LC_TIME, "")]
 
 
 def test_format_dialog_timestamp_uses_locale_short_format():
@@ -77,7 +78,9 @@ def test_format_dialog_timestamp_uses_locale_short_format():
                 return "10.05.2026 18:59:32"
             raise AssertionError(f"unexpected pattern: {pattern}")
 
-    assert server.format_dialog_timestamp(FakeMoment()) == "10.05.2026 18:59:32"
+    fake_moment = cast(dt.datetime, FakeMoment())
+
+    assert prompt_formatting.format_dialog_timestamp(fake_moment) == "10.05.2026 18:59:32"
 
 
 def test_main_initializes_time_locale_before_running(monkeypatch):
@@ -99,7 +102,7 @@ def test_tool_appends_timing_info_when_enabled(monkeypatch):
     monkeypatch.setattr(server, "dialog_handler", stub)
     monkeypatch.setattr(server, "show_timing_info", True)
     monkeypatch.setattr(
-        server,
+        prompt_formatting,
         "build_timing_info_block",
         lambda issued_at, timeout_seconds: "Issued at: 10.05.2026 09:30:00 | "
         "Answer until: 10.05.2026 09:31:30 (client may time out sooner)",
@@ -132,7 +135,7 @@ def test_tool_uses_consistent_question_label_without_context(monkeypatch):
     monkeypatch.setattr(server, "dialog_handler", stub)
     monkeypatch.setattr(server, "show_timing_info", True)
     monkeypatch.setattr(
-        server,
+        prompt_formatting,
         "build_timing_info_block",
         lambda issued_at, timeout_seconds: "Issued at: 10.05.2026 09:30:00 | "
         "Answer until: 10.05.2026 09:31:30 (client may time out sooner)",

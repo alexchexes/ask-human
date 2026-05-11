@@ -237,6 +237,11 @@ the client can stop waiting before this server closes the dialog. In Codex,
 configure `tool_timeout_sec = <seconds>` under
 `[mcp_servers.ask-human-for-context]` in `config.toml`.
 
+When using Telegram delivery, remember that Telegram only keeps unreceived
+updates for up to 24 hours. In practice this means an actively polled prompt can
+wait a long time, but if polling is interrupted for too long, late replies may
+no longer be available to the bot.
+
 ### Dialog Timing Metadata
 
 Use `--show-timing-info` to include `Issued at` and `Answer until` lines in the dialog text:
@@ -249,6 +254,10 @@ When enabled, dialogs also show a note that the MCP client may time out sooner t
 dialog itself.
 
 The timing line uses the current OS short date/time format where available.
+
+Telegram prompts use the same timestamps, but render them in a compact
+expandable metadata block together with the prompt ID and Telegram-specific
+reply notes.
 
 ### Response Channels
 
@@ -265,10 +274,28 @@ Configure Telegram with a single `--telegram` argument in the form
 ask-human-for-context-mcp --transport stdio --response-channel telegram --telegram "<bot_token> <chat_id>"
 ```
 
+Optional Telegram file-download directory:
+
+```bash
+ask-human-for-context-mcp --transport stdio --response-channel telegram --telegram "<bot_token> <chat_id>" --telegram-download-dir "~/Downloads/ask-human"
+```
+
+`--telegram-download-dir` defaults to a folder under the system temp directory.
+It also supports `~`, environment variables such as `%USERPROFILE%`, and the
+`{cwd}` placeholder.
+
 In `both` mode:
 
 - macOS and Linux try to close the local dialog when the Telegram reply arrives first
 - Windows keeps the current Tk dialog behavior; if Telegram wins first, the local dialog may stay open and any later answer from it will be ignored
+
+Telegram reply behavior:
+
+- use Telegram's **Reply** feature on the bot's question message
+- successful replies get a `✅ Received [Prompt ID]` acknowledgement
+- supported replies include text, single files/media messages up to 20 MB, location, venue, and contact
+- albums / media groups are not supported yet; reply again with a single message instead
+- files are downloaded locally and returned to the agent as local paths
 
 ## 🔍 Tool Reference
 
@@ -329,6 +356,8 @@ uv build
 pytest
 black --check .
 isort --check-only .
+mypy src
+pyright
 ```
 
 ### Project Structure
@@ -338,9 +367,14 @@ ask-human-for-context-mcp/
 ├── src/ask_human_for_context_mcp/
 │   ├── __init__.py
 │   ├── __main__.py
-│   └── server.py           # Main MCP server implementation
+│   ├── dialogs.py          # Cross-platform dialog handling
+│   ├── prompt_formatting.py
+│   ├── server.py           # Main MCP server implementation
+│   ├── telegram_client.py  # Telegram prompt transport
+│   └── telegram_models.py
 ├── assets/
 │   └── cursor-icon.icns    # Custom Cursor icon for dialogs
+├── pyrightconfig.json      # Shared Pyright/Pylance project config
 ├── pyproject.toml          # Project configuration
 └── README.md
 ```

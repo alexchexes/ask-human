@@ -3,6 +3,7 @@
 import asyncio
 import sys
 import types
+from typing import Any, cast
 
 from ask_human_for_context_mcp.server import GUIDialogHandler
 
@@ -80,7 +81,7 @@ def test_windows_dialog_applies_dpi_setup(monkeypatch):
 
     fake_root = FakeRoot()
 
-    fake_tk = types.ModuleType("tkinter")
+    fake_tk = cast(Any, types.ModuleType("tkinter"))
     fake_tk.Tk = lambda: fake_root
     fake_tk.simpledialog = types.SimpleNamespace(
         askstring=lambda title, question, parent=None: events.append(

@@ -29,21 +29,35 @@ def test_build_dialog_telegram_notice_is_platform_specific():
     assert "will stay open" in server.build_dialog_telegram_notice("Windows")
 
 
-def test_build_telegram_prompt_text_adds_reply_instruction():
-    """Tell the user to reply to the Telegram message."""
-    prompt_text = server.build_telegram_prompt_text("Prompt text")
+def test_build_telegram_prompt_text_adds_prompt_id_and_reply_instruction():
+    """Format Telegram prompts with compact metadata and reply guidance."""
+    prompt_text = server.build_telegram_prompt_text(
+        "Prompt text",
+        "Context text.",
+        prompt_id="QTEST-1234",
+        timeout_seconds=300,
+        include_timing_info=True,
+    )
 
-    assert prompt_text.endswith("↩️ Reply to this message with your answer.")
+    assert "<b>📋 Context:</b>" in prompt_text
+    assert "<b>❓ Question:</b>" in prompt_text
+    assert "<blockquote expandable>" in prompt_text
+    assert "Prompt ID: QTEST-1234" in prompt_text
+    assert '↩️ Use "Reply" on this message to answer.' in prompt_text
 
 
-def test_telegram_client_resolves_reply_to_sent_message(monkeypatch):
-    """Resolve a Telegram reply that references the sent prompt message."""
-    client = server.TelegramPromptClient(server.TelegramConfig("123456:ABCDEF", "-1009876543210"))
+def test_telegram_client_resolves_reply_to_sent_message(monkeypatch, tmp_path):
+    """Resolve a Telegram reply that references the sent prompt message and ack it."""
+    client = server.TelegramPromptClient(
+        server.TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
     updates = [
         [
             {
                 "update_id": 1,
                 "message": {
+                    "message_id": 201,
                     "chat": {"id": -1009876543210},
                     "reply_to_message": {"message_id": 101},
                     "text": "telegram answer",
@@ -52,19 +66,80 @@ def test_telegram_client_resolves_reply_to_sent_message(monkeypatch):
         ],
         [],
     ]
+    sent_messages = []
 
     async def fake_bot_api_request(method, payload, timeout):
         if method == "sendMessage":
-            return {"message_id": 101}
+            sent_messages.append(payload)
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 301}
         if method == "getUpdates":
             return updates.pop(0)
         raise AssertionError(f"Unexpected method: {method}")
 
     monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
 
-    result = asyncio.run(client.ask_question("Prompt text", 5))
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
 
     assert result == "telegram answer"
+    assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
+
+
+def test_telegram_client_rejects_too_large_file_and_waits_for_valid_text(monkeypatch, tmp_path):
+    """Send a retry error for oversized files and keep waiting for a valid reply."""
+    client = server.TelegramPromptClient(
+        server.TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 210,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "document": {
+                        "file_id": "file-too-big",
+                        "file_size": 25 * 1024 * 1024,
+                        "file_name": "huge.zip",
+                    },
+                },
+            }
+        ],
+        [
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 211,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": "fallback text answer",
+                },
+            }
+        ],
+        [],
+    ]
+    sent_messages = []
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            sent_messages.append(payload)
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 302}
+        if method == "getUpdates":
+            return updates.pop(0)
+        raise AssertionError(f"Unexpected method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    assert result == "fallback text answer"
+    assert any("File too large for [QTEST-1234]" in payload["text"] for payload in sent_messages)
+    assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
 
 
 def test_tool_uses_telegram_only_mode_without_dialog(monkeypatch):
@@ -74,10 +149,12 @@ def test_tool_uses_telegram_only_mode_without_dialog(monkeypatch):
         def __init__(self):
             self.prompt = None
             self.timeout = None
+            self.prompt_id = None
 
-        async def ask_question(self, prompt_text, timeout):
+        async def ask_question(self, prompt_text, timeout, prompt_id):
             self.prompt = prompt_text
             self.timeout = timeout
+            self.prompt_id = prompt_id
             return "telegram answer"
 
     class StubDialogHandler:
@@ -100,15 +177,18 @@ def test_tool_uses_telegram_only_mode_without_dialog(monkeypatch):
 
     assert result == "✅ User response: telegram answer"
     assert stub_telegram.timeout == 300
-    assert "📋 Context:" in stub_telegram.prompt
-    assert "❓ Question:" in stub_telegram.prompt
+    assert stub_telegram.prompt is not None
+    assert stub_telegram.prompt_id is not None
+    assert stub_telegram.prompt_id.startswith("Q")
+    assert "<b>📋 Context:</b>" in stub_telegram.prompt
+    assert "<b>❓ Question:</b>" in stub_telegram.prompt
 
 
 def test_both_mode_adds_windows_warning_and_threads_dialog(monkeypatch):
     """Warn on Windows and run the local dialog path in a worker thread."""
 
     class StubTelegramClient:
-        async def ask_question(self, prompt_text, timeout):
+        async def ask_question(self, prompt_text, timeout, prompt_id):
             return "telegram answer"
 
     class StubDialogHandler:
@@ -149,6 +229,7 @@ def test_both_mode_adds_windows_warning_and_threads_dialog(monkeypatch):
     assert result == "✅ User response: telegram answer"
     assert stub_dialog.calls[0]["run_in_thread"] is True
     assert stub_dialog.calls[0]["cancel_event"] is None
+    assert stub_dialog.calls[0]["question"] is not None
     assert "📨 Also sent to Telegram." in stub_dialog.calls[0]["question"]
     assert "will stay open" in stub_dialog.calls[0]["question"]
 
@@ -157,7 +238,7 @@ def test_both_mode_cancels_linux_dialog_when_telegram_wins(monkeypatch):
     """Signal subprocess-backed dialogs to close when Telegram wins the race."""
 
     class StubTelegramClient:
-        async def ask_question(self, prompt_text, timeout):
+        async def ask_question(self, prompt_text, timeout, prompt_id):
             return "telegram answer"
 
     class StubDialogHandler:
@@ -177,6 +258,7 @@ def test_both_mode_cancels_linux_dialog_when_telegram_wins(monkeypatch):
         ):
             self.question = question
             self.cancel_event = cancel_event
+            assert cancel_event is not None
             await cancel_event.wait()
             return None
 
@@ -192,6 +274,7 @@ def test_both_mode_cancels_linux_dialog_when_telegram_wins(monkeypatch):
 
     assert result == "✅ User response: telegram answer"
     assert stub_dialog.cancel_event is not None
+    assert stub_dialog.question is not None
     assert stub_dialog.cancel_event.is_set() is True
     assert "📨 Also sent to Telegram." in stub_dialog.question
     assert "will stay open" not in stub_dialog.question
