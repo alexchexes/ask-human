@@ -11,6 +11,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Optional, cast
 
+from .broker_state import TelegramBrokerIdentity
 from .prompt_formatting import TELEGRAM_DOWNLOAD_LIMIT_LABEL
 from .telegram_models import (
     DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS,
@@ -26,24 +27,43 @@ from .telegram_models import (
 class TelegramPromptClient:
     """Minimal long-polling Telegram client for prompt/response workflows."""
 
-    def __init__(self, config: TelegramConfig, download_dir: Path) -> None:
+    ISSUE_URL = "https://github.com/galperetz/ask-human-for-context-mcp/issues"
+
+    def __init__(
+        self,
+        config: TelegramConfig,
+        download_dir: Optional[Path] = None,
+        *,
+        broker_identity: Optional[TelegramBrokerIdentity] = None,
+    ) -> None:
         self.bot_token = config.bot_token
         self.chat_id = config.chat_id
         self.download_dir = download_dir
+        self.broker_identity = broker_identity
         self._lock = asyncio.Lock()
         self._next_update_offset: Optional[int] = None
         self._pending_by_message_id: dict[int, TelegramPendingPrompt] = {}
         self._poller_task: Optional[asyncio.Task[None]] = None
 
-    async def ask_question(self, prompt_text: str, timeout: int, prompt_id: str) -> Optional[str]:
+    async def ask_question(
+        self,
+        prompt_text: str,
+        timeout: int,
+        prompt_id: str,
+        download_dir: Optional[Path] = None,
+    ) -> Optional[str]:
         """Send a prompt message and wait for a reply to that specific message."""
         message_id = await self._send_prompt(prompt_text)
         response_future = asyncio.get_running_loop().create_future()
+        resolved_download_dir = download_dir or self.download_dir
+        if resolved_download_dir is None:
+            raise TelegramPromptError("No Telegram download directory was configured.")
 
         async with self._lock:
             self._pending_by_message_id[message_id] = TelegramPendingPrompt(
                 future=response_future,
                 prompt_id=prompt_id,
+                download_dir=resolved_download_dir,
             )
             self._ensure_poller_locked()
 
@@ -129,7 +149,11 @@ class TelegramPromptClient:
             return
 
         prompt_message_id, pending_prompt, message = matched
-        resolution = await self._build_reply_resolution(message, pending_prompt.prompt_id)
+        resolution = await self._build_reply_resolution(
+            message,
+            pending_prompt.prompt_id,
+            download_dir=pending_prompt.download_dir,
+        )
         user_message_id = message.get("message_id")
         reply_to_user_message_id = user_message_id if isinstance(user_message_id, int) else None
 
@@ -181,12 +205,17 @@ class TelegramPromptClient:
             pending_prompt = self._pending_by_message_id.get(reply_message_id)
 
         if pending_prompt is None:
+            await self._warn_on_foreign_broker_reply(message, reply_to_message)
             return None
 
         return reply_message_id, pending_prompt, message
 
     async def _build_reply_resolution(
-        self, message: dict[str, Any], prompt_id: str
+        self,
+        message: dict[str, Any],
+        prompt_id: str,
+        *,
+        download_dir: Path,
     ) -> TelegramReplyResolution | TelegramReplyRejection:
         """Turn one matched Telegram reply into an agent-facing response or a retry prompt."""
         if isinstance(message.get("media_group_id"), str):
@@ -207,6 +236,7 @@ class TelegramPromptClient:
                 "document",
                 cast(dict[str, Any], message["document"]),
                 prompt_id,
+                download_dir=download_dir,
                 reply_message_id=reply_message_id,
                 caption=caption,
                 original_file_name=self._clean_optional_text(message["document"].get("file_name")),
@@ -217,6 +247,7 @@ class TelegramPromptClient:
                 "video",
                 cast(dict[str, Any], message["video"]),
                 prompt_id,
+                download_dir=download_dir,
                 reply_message_id=reply_message_id,
                 caption=caption,
                 original_file_name=self._clean_optional_text(message["video"].get("file_name")),
@@ -227,6 +258,7 @@ class TelegramPromptClient:
                 "audio",
                 cast(dict[str, Any], message["audio"]),
                 prompt_id,
+                download_dir=download_dir,
                 reply_message_id=reply_message_id,
                 caption=caption,
                 original_file_name=self._clean_optional_text(message["audio"].get("file_name")),
@@ -237,6 +269,7 @@ class TelegramPromptClient:
                 "voice",
                 cast(dict[str, Any], message["voice"]),
                 prompt_id,
+                download_dir=download_dir,
                 reply_message_id=reply_message_id,
                 caption=caption,
             )
@@ -246,6 +279,7 @@ class TelegramPromptClient:
                 "animation",
                 cast(dict[str, Any], message["animation"]),
                 prompt_id,
+                download_dir=download_dir,
                 reply_message_id=reply_message_id,
                 caption=caption,
                 original_file_name=self._clean_optional_text(message["animation"].get("file_name")),
@@ -256,6 +290,7 @@ class TelegramPromptClient:
                 "video_note",
                 cast(dict[str, Any], message["video_note"]),
                 prompt_id,
+                download_dir=download_dir,
                 reply_message_id=reply_message_id,
                 maybe_unintended=True,
             )
@@ -265,6 +300,7 @@ class TelegramPromptClient:
                 "sticker",
                 cast(dict[str, Any], message["sticker"]),
                 prompt_id,
+                download_dir=download_dir,
                 reply_message_id=reply_message_id,
                 maybe_unintended=True,
             )
@@ -275,6 +311,7 @@ class TelegramPromptClient:
                 "photo",
                 photo,
                 prompt_id,
+                download_dir=download_dir,
                 reply_message_id=reply_message_id,
                 caption=caption,
             )
@@ -378,6 +415,7 @@ class TelegramPromptClient:
         file_payload: dict[str, Any],
         prompt_id: str,
         *,
+        download_dir: Path,
         reply_message_id: int,
         caption: Optional[str] = None,
         original_file_name: Optional[str] = None,
@@ -403,6 +441,7 @@ class TelegramPromptClient:
                 file_id,
                 reply_type,
                 prompt_id,
+                download_dir=download_dir,
                 reply_message_id=reply_message_id,
                 original_file_name=original_file_name,
                 declared_file_size=file_size if isinstance(file_size, int) else None,
@@ -435,6 +474,7 @@ class TelegramPromptClient:
         reply_type: str,
         prompt_id: str,
         *,
+        download_dir: Path,
         reply_message_id: int,
         original_file_name: Optional[str] = None,
         declared_file_size: Optional[int] = None,
@@ -455,7 +495,7 @@ class TelegramPromptClient:
         if isinstance(file_size, int) and file_size > TELEGRAM_DOWNLOAD_LIMIT_BYTES:
             raise ValueError("Telegram file exceeds the supported download limit.")
 
-        target_dir = self.download_dir / prompt_id
+        target_dir = download_dir / prompt_id
         target_dir.mkdir(parents=True, exist_ok=True)
         target_name = self._build_download_file_name(
             reply_type,
@@ -571,6 +611,49 @@ class TelegramPromptClient:
             await self._bot_api_request("sendMessage", payload, timeout=20)
         except TelegramPromptError:
             return
+
+    async def _warn_on_foreign_broker_reply(
+        self,
+        message: dict[str, Any],
+        reply_to_message: dict[str, Any],
+    ) -> None:
+        """Warn if this broker consumed a reply that appears intended for another broker."""
+        if self.broker_identity is None:
+            return
+
+        replied_text = reply_to_message.get("text")
+        if not isinstance(replied_text, str):
+            return
+
+        broker_reference = self._parse_broker_reference(replied_text)
+        if broker_reference is None:
+            return
+
+        foreign_label, foreign_id = broker_reference
+        if foreign_id == self.broker_identity.broker_id:
+            return
+
+        reply_message_id = self._extract_message_id(message)
+        warning_text = (
+            f"⚠️ Instance [{self.broker_identity.broker_label} [{self.broker_identity.broker_id}]] "
+            f"just consumed your reply, but it appears intended for instance "
+            f"[{foreign_label} [{foreign_id}]]. If you use the same bot from multiple machines "
+            f"or apps at the same time, avoid doing that. Otherwise, please open an issue: "
+            f"{self.ISSUE_URL}"
+        )
+        await self._safe_send_status_message(
+            warning_text,
+            reply_to_message_id=reply_message_id if reply_message_id else None,
+        )
+
+    @staticmethod
+    def _parse_broker_reference(prompt_text: str) -> Optional[tuple[str, str]]:
+        """Extract broker label/id metadata from one broker-formatted prompt."""
+        match = re.search(r"Broker:\s*(.+?)\s*\[([a-f0-9]+)\]", prompt_text)
+        if not match:
+            return None
+
+        return match.group(1).strip(), match.group(2).strip()
 
     async def _bot_api_request(self, method: str, payload: dict[str, Any], *, timeout: int) -> Any:
         """Issue a Telegram Bot API request through the standard library HTTP stack."""

@@ -116,6 +116,8 @@ def build_telegram_prompt_text(
     timeout_seconds: int,
     include_timing_info: bool,
     issued_at: Optional[dt.datetime] = None,
+    broker_label: Optional[str] = None,
+    broker_id: Optional[str] = None,
 ) -> str:
     """Build a Telegram-specific prompt using HTML parse mode and compact metadata."""
     effective_issued_at = issued_at or dt.datetime.now().astimezone()
@@ -152,6 +154,8 @@ def build_telegram_prompt_text(
             f"Prompt ID: {prompt_id}",
         ]
     )
+    if broker_label and broker_id:
+        metadata_lines.append(f"Broker: {broker_label} [{broker_id}]")
     metadata_block = "\n".join(escape_telegram_html(line) for line in metadata_lines)
     parts.extend(
         [

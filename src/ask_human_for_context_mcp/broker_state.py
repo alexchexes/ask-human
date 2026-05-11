@@ -1,16 +1,22 @@
 """Persistent state helpers for the local Telegram broker."""
 
+import contextlib
 import os
 import platform
 import socket
 import sqlite3
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
+
+from .telegram_models import TelegramConfig, resolve_telegram_target_key
 
 DEFAULT_BROKER_STATE_DIR_NAME = "ask-human-for-context-mcp"
 BROKER_STATE_DB_FILENAME = "telegram-broker.sqlite3"
+BROKER_STARTUP_LOCK_FILENAME = "broker-startup.lock"
+BROKER_TARGETS_DIRNAME = "targets"
 
 
 @dataclass(frozen=True)
@@ -27,6 +33,16 @@ class TelegramBrokerState:
 
     identity: TelegramBrokerIdentity
     listen_url: Optional[str]
+
+
+@dataclass(frozen=True)
+class TelegramBrokerHealth:
+    """Health data returned by a running broker."""
+
+    broker_id: str
+    broker_label: str
+    listen_url: str
+    target_key: str
 
 
 def resolve_broker_state_dir(state_dir: Optional[str] = None) -> Path:
@@ -59,6 +75,12 @@ def resolve_default_broker_label() -> str:
     """Choose a human-friendly default label for the local broker."""
     hostname = socket.gethostname().strip()
     return hostname or "local-broker"
+
+
+def resolve_target_broker_state_dir(base_state_dir: Path, target: TelegramConfig) -> Path:
+    """Map one Telegram target to its dedicated local broker state directory."""
+    target_key = resolve_telegram_target_key(target)
+    return (base_state_dir / BROKER_TARGETS_DIRNAME / target_key).resolve()
 
 
 def _ensure_state_db(state_dir: Path) -> sqlite3.Connection:
@@ -152,3 +174,44 @@ def load_broker_state(state_dir: Path) -> Optional[TelegramBrokerState]:
 
     identity = TelegramBrokerIdentity(broker_id=broker_id, broker_label=broker_label)
     return TelegramBrokerState(identity=identity, listen_url=listen_url)
+
+
+@contextlib.contextmanager
+def acquire_startup_lock(
+    state_dir: Path,
+    *,
+    timeout_seconds: float = 15.0,
+    stale_after_seconds: float = 60.0,
+) -> Iterator[None]:
+    """Serialize local broker startup for one target with a simple lock file."""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = state_dir / BROKER_STARTUP_LOCK_FILENAME
+    deadline = time.monotonic() + timeout_seconds
+
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            try:
+                age_seconds = time.time() - lock_path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+
+            if age_seconds >= stale_after_seconds:
+                with contextlib.suppress(FileNotFoundError):
+                    lock_path.unlink()
+                continue
+
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Timed out waiting for the broker startup lock.")
+
+            time.sleep(0.2)
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(str(os.getpid()))
+        yield
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            lock_path.unlink()

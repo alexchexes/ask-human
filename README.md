@@ -284,6 +284,42 @@ ask-human-for-context-mcp --transport stdio --response-channel telegram --telegr
 It also supports `~`, environment variables such as `%USERPROFILE%`, and the
 `{cwd}` placeholder.
 
+### Local Telegram Broker
+
+Telegram delivery now uses a local auto-started broker process instead of
+letting each MCP session poll `getUpdates` independently.
+
+Current behavior:
+
+- one local broker is created per Telegram target (`bot_token + chat_id`)
+- sessions on the same machine that use the same target reuse that broker
+- different Telegram targets on the same machine use different brokers
+- broker discovery uses persisted local state plus a health check
+- the broker binds to `127.0.0.1` on an OS-assigned free port by default
+
+This is what makes same-machine concurrent Telegram prompts safe.
+
+Current limitation:
+
+- cross-machine or shared-server coordination is **not** implemented yet
+- if two different machines use the same bot target at the same time, replies
+  can still be consumed by the wrong machine
+
+The Telegram prompt metadata includes both:
+
+- `Prompt ID: ...`
+- `Broker: <label> [<id>]`
+
+This helps identify which local broker instance sent a prompt and makes some
+cross-machine mix-ups easier to diagnose.
+
+Advanced/manual broker options are available mainly for debugging and future
+remote deployment work:
+
+```bash
+ask-human-for-context-mcp --telegram-broker --telegram "<bot_token> <chat_id>"
+```
+
 In `both` mode:
 
 - macOS and Linux try to close the local dialog when the Telegram reply arrives first
@@ -296,6 +332,8 @@ Telegram reply behavior:
 - supported replies include text, single files/media messages up to 20 MB, location, venue, and contact
 - albums / media groups are not supported yet; reply again with a single message instead
 - files are downloaded locally and returned to the agent as local paths
+- replies that appear intended for another broker instance can trigger a warning
+  message instead of being silently misrouted
 
 ## 🔍 Tool Reference
 
@@ -368,8 +406,11 @@ ask-human-for-context-mcp/
 │   ├── __init__.py
 │   ├── __main__.py
 │   ├── dialogs.py          # Cross-platform dialog handling
+│   ├── broker_state.py     # Persistent local broker identity/state
 │   ├── prompt_formatting.py
 │   ├── server.py           # Main MCP server implementation
+│   ├── telegram_broker.py  # Local Telegram broker service
+│   ├── telegram_broker_client.py
 │   ├── telegram_client.py  # Telegram prompt transport
 │   └── telegram_models.py
 ├── assets/

@@ -4,11 +4,8 @@ import os
 import subprocess
 import sys
 
-from ask_human_for_context_mcp.server import (
-    DEFAULT_DIALOG_TITLE,
-    GUIDialogHandler,
-    resolve_dialog_title,
-)
+from ask_human_for_context_mcp.dialogs import GUIDialogHandler
+from ask_human_for_context_mcp.prompt_formatting import DEFAULT_DIALOG_TITLE, resolve_dialog_title
 
 
 def test_resolve_dialog_title_defaults():

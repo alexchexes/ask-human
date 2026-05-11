@@ -1,6 +1,7 @@
 """Telegram configuration, constants, and shared reply model types."""
 
 import asyncio
+import hashlib
 import os
 import tempfile
 from dataclasses import dataclass
@@ -20,6 +21,12 @@ class TelegramConfig:
 
     bot_token: str
     chat_id: str
+
+
+def resolve_telegram_target_key(config: TelegramConfig) -> str:
+    """Derive a stable opaque key for one Telegram bot/chat target."""
+    payload = f"{config.bot_token}\0{config.chat_id}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
 
 
 def parse_telegram_target(telegram_target: Optional[str]) -> Optional[TelegramConfig]:
@@ -63,6 +70,7 @@ class TelegramPendingPrompt:
 
     future: asyncio.Future[str]
     prompt_id: str
+    download_dir: Path
 
 
 @dataclass(frozen=True)

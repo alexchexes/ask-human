@@ -12,7 +12,7 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.routing import Mount, Route
 
-from .broker_state import resolve_broker_state_dir
+from .broker_state import resolve_broker_state_dir, resolve_target_broker_state_dir
 from .dialogs import (
     DEFAULT_DIALOG_TIMEOUT_SECONDS,
     GUIDialogHandler,
@@ -23,17 +23,12 @@ from .prompt_formatting import (
     DEFAULT_DIALOG_TITLE,
     build_dialog_telegram_notice,
     build_prompt_text,
-    build_telegram_prompt_text,
-    build_timing_info_block,
-    format_dialog_timestamp,
     generate_prompt_id,
     initialize_time_locale,
-    resolve_dialog_title,
 )
 from .telegram_broker import run_telegram_broker
-from .telegram_client import TelegramPromptClient
+from .telegram_broker_client import TelegramBrokerClient
 from .telegram_models import (
-    TelegramConfig,
     TelegramPromptError,
     parse_telegram_target,
     resolve_telegram_download_dir,
@@ -57,7 +52,7 @@ dialog_handler = GUIDialogHandler()
 dialog_timeout_seconds = DEFAULT_DIALOG_TIMEOUT_SECONDS
 show_timing_info = False
 response_channel = DEFAULT_RESPONSE_CHANNEL
-telegram_client: Optional[TelegramPromptClient] = None
+telegram_client: Optional[TelegramBrokerClient] = None
 
 
 def _consume_detached_task_result(task: asyncio.Task[Any]) -> None:
@@ -67,10 +62,12 @@ def _consume_detached_task_result(task: asyncio.Task[Any]) -> None:
 
 
 async def _get_first_channel_response(
+    question: str,
+    context: str,
     dialog_prompt: str,
-    telegram_prompt: str,
     timeout_seconds: int,
     prompt_id: str,
+    issued_at: dt.datetime,
 ) -> Optional[str]:
     """Race dialog and Telegram, returning the first successful response."""
     if telegram_client is None:
@@ -90,7 +87,14 @@ async def _get_first_channel_response(
         )
     )
     telegram_task = asyncio.create_task(
-        telegram_client.ask_question(telegram_prompt, timeout_seconds, prompt_id)
+        telegram_client.ask_question(
+            question,
+            context,
+            prompt_id=prompt_id,
+            timeout_seconds=timeout_seconds,
+            include_timing_info=show_timing_info,
+            issued_at=issued_at,
+        )
     )
 
     pending_tasks: dict[asyncio.Task[Optional[str]], str] = {
@@ -141,10 +145,12 @@ async def _get_first_channel_response(
 
 
 async def get_user_input_from_configured_channel(
+    question: str,
+    context: str,
     dialog_prompt: str,
-    telegram_prompt: str,
     timeout_seconds: int,
     prompt_id: str,
+    issued_at: dt.datetime,
 ) -> Optional[str]:
     """Use the currently configured response channel(s) to collect user input."""
     if response_channel == "dialog":
@@ -157,15 +163,24 @@ async def get_user_input_from_configured_channel(
 
     if response_channel == "telegram":
         try:
-            return await telegram_client.ask_question(telegram_prompt, timeout_seconds, prompt_id)
+            return await telegram_client.ask_question(
+                question,
+                context,
+                prompt_id=prompt_id,
+                timeout_seconds=timeout_seconds,
+                include_timing_info=show_timing_info,
+                issued_at=issued_at,
+            )
         except TelegramPromptError as exc:
             raise UserPromptError(f"Telegram prompt failed: {exc}") from exc
 
     return await _get_first_channel_response(
+        question,
+        context,
         dialog_prompt,
-        telegram_prompt,
         timeout_seconds,
         prompt_id,
+        issued_at,
     )
 
 
@@ -235,21 +250,14 @@ async def asking_user_missing_context(question: str, context: str = "") -> str:
             extra_note=telegram_notice,
             issued_at=issued_at,
         )
-        telegram_prompt = build_telegram_prompt_text(
-            question,
-            context,
-            prompt_id=prompt_id,
-            timeout_seconds=timeout_seconds,
-            include_timing_info=show_timing_info,
-            issued_at=issued_at,
-        )
-
         # Get user input via the configured channel(s)
         response = await get_user_input_from_configured_channel(
+            question,
+            context,
             dialog_prompt,
-            telegram_prompt,
             timeout_seconds,
             prompt_id,
+            issued_at,
         )
 
         # Handle different response scenarios with custom exceptions
@@ -416,6 +424,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--telegram-broker-root-state-dir",
+        default=None,
+        help=(
+            "Optional root state directory used by local auto-started Telegram brokers. "
+            "Defaults to a platform-specific per-user state location. Supports ~, "
+            "environment variables, and {cwd}."
+        ),
+    )
+    parser.add_argument(
         "--telegram-broker",
         action="store_true",
         help="Run the local Telegram broker service instead of the MCP server.",
@@ -451,14 +468,23 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.telegram_broker:
+        try:
+            telegram_target = parse_telegram_target(args.telegram)
+        except ValueError as exc:
+            parser.error(str(exc))
+
+        if telegram_target is None:
+            parser.error("--telegram is required when --telegram-broker is used.")
         if args.telegram_broker_port < 0 or args.telegram_broker_port > 65535:
             parser.error("--telegram-broker-port must be between 0 and 65535.")
 
-        broker_state_dir = resolve_broker_state_dir(args.telegram_broker_state_dir)
+        broker_state_root = resolve_broker_state_dir(args.telegram_broker_state_dir)
+        broker_state_dir = resolve_target_broker_state_dir(broker_state_root, telegram_target)
         run_telegram_broker(
             host=args.telegram_broker_host,
             port=args.telegram_broker_port,
             state_dir=broker_state_dir,
+            telegram_target=telegram_target,
             broker_label=args.telegram_broker_label,
         )
         return
@@ -489,7 +515,12 @@ def main() -> None:
     show_timing_info = args.show_timing_info
     response_channel = args.response_channel
     telegram_client = (
-        TelegramPromptClient(telegram_target, telegram_download_dir)
+        TelegramBrokerClient(
+            telegram_target,
+            telegram_download_dir,
+            broker_state_root=resolve_broker_state_dir(args.telegram_broker_root_state_dir),
+            broker_label=args.telegram_broker_label,
+        )
         if telegram_target is not None
         else None
     )

@@ -9,12 +9,14 @@ from ask_human_for_context_mcp.broker_state import (
     load_or_create_broker_identity,
     persist_broker_listen_url,
     resolve_broker_state_dir,
+    resolve_target_broker_state_dir,
 )
 from ask_human_for_context_mcp.telegram_broker import (
     build_broker_health_payload,
     build_broker_listen_url,
     run_telegram_broker,
 )
+from ask_human_for_context_mcp.telegram_models import TelegramConfig, resolve_telegram_target_key
 
 
 def test_broker_identity_is_stable_for_one_state_dir(tmp_path):
@@ -68,12 +70,14 @@ def test_build_broker_health_payload_contains_identity_and_url(tmp_path):
     payload = build_broker_health_payload(
         identity,
         listen_url="http://127.0.0.1:7456",
+        target_key="feedbeef",
     )
 
     assert payload["status"] == "ok"
     assert payload["broker_id"] == identity.broker_id
     assert payload["broker_label"] == "laptop"
     assert payload["listen_url"] == "http://127.0.0.1:7456"
+    assert payload["target_key"] == "feedbeef"
     assert "version" in payload
 
 
@@ -87,6 +91,8 @@ def test_main_runs_telegram_broker_mode(monkeypatch, tmp_path):
         [
             "ask-human-for-context-mcp",
             "--telegram-broker",
+            "--telegram",
+            "123456:ABCDEF -1009876543210",
             "--telegram-broker-label",
             "office",
             "--telegram-broker-state-dir",
@@ -106,10 +112,14 @@ def test_main_runs_telegram_broker_mode(monkeypatch, tmp_path):
 
     server.main()
 
+    telegram_target = TelegramConfig("123456:ABCDEF", "-1009876543210")
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 7456
     assert captured["broker_label"] == "office"
-    assert captured["state_dir"] == tmp_path.resolve()
+    assert captured["telegram_target"] == telegram_target
+    assert captured["state_dir"] == resolve_target_broker_state_dir(
+        tmp_path.resolve(), telegram_target
+    )
     assert "mcp_run" not in captured
 
 
@@ -160,7 +170,7 @@ def test_run_telegram_broker_exits_cleanly_on_keyboard_interrupt(monkeypatch, tm
     )
     monkeypatch.setattr(
         "ask_human_for_context_mcp.telegram_broker.create_telegram_broker_app",
-        lambda identity, *, listen_url: object(),
+        lambda identity, *, listen_url, telegram_client, target_key: object(),
     )
     monkeypatch.setattr(
         "ask_human_for_context_mcp.telegram_broker.uvicorn.Config",
@@ -188,6 +198,7 @@ def test_run_telegram_broker_exits_cleanly_on_keyboard_interrupt(monkeypatch, tm
         host="127.0.0.1",
         port=0,
         state_dir=tmp_path,
+        telegram_target=TelegramConfig("123456:ABCDEF", "-1009876543210"),
         broker_label="office",
     )
 
