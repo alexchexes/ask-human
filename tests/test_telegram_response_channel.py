@@ -6,12 +6,17 @@ import datetime as dt
 import pytest
 
 from ask_human_for_context_mcp import server
+from ask_human_for_context_mcp.broker_state import TelegramBrokerIdentity
 from ask_human_for_context_mcp.prompt_formatting import (
     build_dialog_telegram_notice,
     build_telegram_prompt_text,
 )
 from ask_human_for_context_mcp.telegram_client import TelegramPromptClient
-from ask_human_for_context_mcp.telegram_models import TelegramConfig, parse_telegram_target
+from ask_human_for_context_mcp.telegram_models import (
+    DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS,
+    TelegramConfig,
+    parse_telegram_target,
+)
 
 
 def test_parse_telegram_target_parses_token_and_chat_id():
@@ -96,6 +101,50 @@ def test_telegram_client_resolves_reply_to_sent_message(monkeypatch, tmp_path):
     assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
 
 
+def test_telegram_client_confirms_consumed_updates_before_stopping(monkeypatch, tmp_path):
+    """Perform one final offset-advancing poll so consumed replies do not replay after restart."""
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 201,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": "telegram answer",
+                },
+            }
+        ],
+        [],
+    ]
+    get_updates_payloads = []
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 301}
+        if method == "getUpdates":
+            get_updates_payloads.append(payload.copy())
+            return updates.pop(0)
+        raise AssertionError(f"Unexpected method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    assert result == "telegram answer"
+    assert [payload["offset"] for payload in get_updates_payloads] == [None, 2]
+    assert [payload["timeout"] for payload in get_updates_payloads] == [
+        DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS,
+        0,
+    ]
+
+
 def test_telegram_client_rejects_too_large_file_and_waits_for_valid_text(monkeypatch, tmp_path):
     """Send a retry error for oversized files and keep waiting for a valid reply."""
     client = TelegramPromptClient(
@@ -149,6 +198,188 @@ def test_telegram_client_rejects_too_large_file_and_waits_for_valid_text(monkeyp
 
     assert result == "fallback text answer"
     assert any("File too large for [QTEST-1234]" in payload["text"] for payload in sent_messages)
+    assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
+
+
+def test_telegram_client_warns_once_for_non_reply_message(monkeypatch, tmp_path):
+    """Hint once when the user sends a non-reply message while a local prompt is pending."""
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 210,
+                    "chat": {"id": -1009876543210},
+                    "text": "plain message without Reply",
+                },
+            }
+        ],
+        [
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 211,
+                    "chat": {"id": -1009876543210},
+                    "text": "another plain message without Reply",
+                },
+            }
+        ],
+        [
+            {
+                "update_id": 3,
+                "message": {
+                    "message_id": 212,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": "proper reply",
+                },
+            }
+        ],
+        [],
+    ]
+    sent_messages = []
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            sent_messages.append(payload)
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 302 + len(sent_messages)}
+        if method == "getUpdates":
+            return updates.pop(0)
+        raise AssertionError(f"Unexpected method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    assert result == "proper reply"
+    assert [payload["text"] for payload in sent_messages].count(
+        TelegramPromptClient.NON_REPLY_HINT_TEXT
+    ) == 1
+    assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
+
+
+def test_telegram_client_warns_for_stale_local_reply(monkeypatch, tmp_path):
+    """Warn when the user replies to one of this broker's own older inactive prompts."""
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+        broker_identity=TelegramBrokerIdentity("abcd1234", "Alex Laptop"),
+    )
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 220,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {
+                        "message_id": 100,
+                        "text": (
+                            "<blockquote expandable>\n"
+                            "Answers support text or files up to 20 MB.\n"
+                            "Prompt ID: QOLD-0001\n"
+                            "Broker: Alex Laptop [abcd1234]\n"
+                            "</blockquote>"
+                        ),
+                    },
+                    "text": "answer to old prompt",
+                },
+            }
+        ],
+        [
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 221,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": "answer to current prompt",
+                },
+            }
+        ],
+        [],
+    ]
+    sent_messages = []
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            sent_messages.append(payload)
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 400 + len(sent_messages)}
+        if method == "getUpdates":
+            return updates.pop(0)
+        raise AssertionError(f"Unexpected method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    assert result == "answer to current prompt"
+    assert any(
+        payload["text"]
+        == "⚠️ Message is ignored. Prompt [QOLD-0001] is no longer active. Ask the agent to send a new question."
+        for payload in sent_messages
+    )
+    assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
+
+
+def test_stale_reply_warning_stays_silent_without_reply_text(monkeypatch, tmp_path):
+    """Do not guess stale ownership if Telegram does not provide replied-to prompt text."""
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+        broker_identity=TelegramBrokerIdentity("abcd1234", "Alex Laptop"),
+    )
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 230,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 100},
+                    "text": "reply without nested prompt text",
+                },
+            }
+        ],
+        [
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 231,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": "answer to current prompt",
+                },
+            }
+        ],
+        [],
+    ]
+    sent_messages = []
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            sent_messages.append(payload)
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 500 + len(sent_messages)}
+        if method == "getUpdates":
+            return updates.pop(0)
+        raise AssertionError(f"Unexpected method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    assert result == "answer to current prompt"
+    assert not any("is no longer active" in payload["text"] for payload in sent_messages[:-1])
     assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
 
 

@@ -28,6 +28,11 @@ class TelegramPromptClient:
     """Minimal long-polling Telegram client for prompt/response workflows."""
 
     ISSUE_URL = "https://github.com/galperetz/ask-human-for-context-mcp/issues"
+    NON_REPLY_HINT_TEXT = "⚠️ Message is ignored. Please use Reply on the bot's message."
+    STALE_REPLY_HINT_TEMPLATE = (
+        "⚠️ Message is ignored. {prompt_target} is no longer active. Ask the agent to send "
+        "a new question."
+    )
 
     def __init__(
         self,
@@ -44,6 +49,8 @@ class TelegramPromptClient:
         self._next_update_offset: Optional[int] = None
         self._pending_by_message_id: dict[int, TelegramPendingPrompt] = {}
         self._poller_task: Optional[asyncio.Task[None]] = None
+        self._latest_prompt_message_id: Optional[int] = None
+        self._last_non_reply_hint_after_prompt_message_id: Optional[int] = None
 
     async def ask_question(
         self,
@@ -65,6 +72,7 @@ class TelegramPromptClient:
                 prompt_id=prompt_id,
                 download_dir=resolved_download_dir,
             )
+            self._latest_prompt_message_id = message_id
             self._ensure_poller_locked()
 
         try:
@@ -74,6 +82,9 @@ class TelegramPromptClient:
         finally:
             async with self._lock:
                 self._pending_by_message_id.pop(message_id, None)
+                if not self._pending_by_message_id:
+                    self._latest_prompt_message_id = None
+                    self._last_non_reply_hint_after_prompt_message_id = None
 
     async def _send_prompt(self, prompt_text: str) -> int:
         """Send the outbound Telegram message and return its message id."""
@@ -105,20 +116,24 @@ class TelegramPromptClient:
         try:
             while True:
                 async with self._lock:
-                    if not self._pending_by_message_id:
+                    has_pending_prompts = bool(self._pending_by_message_id)
+                    offset = self._next_update_offset
+
+                    if not has_pending_prompts and offset is None:
                         self._poller_task = None
                         return
 
-                    offset = self._next_update_offset
-
+                poll_timeout = (
+                    0 if not has_pending_prompts else DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS
+                )
                 updates = await self._bot_api_request(
                     "getUpdates",
                     {
                         "offset": offset,
-                        "timeout": DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS,
+                        "timeout": poll_timeout,
                         "allowed_updates": ["message"],
                     },
-                    timeout=DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS + 10,
+                    timeout=poll_timeout + 10,
                 )
 
                 if not isinstance(updates, list):
@@ -132,6 +147,15 @@ class TelegramPromptClient:
 
                 for update in updates:
                     await self._handle_update(update)
+
+                # Telegram only considers processed updates confirmed once we perform another
+                # getUpdates call with an offset higher than their update_id. When the last
+                # pending prompt completes, keep draining with timeout=0 until Telegram returns
+                # an empty page, then stop the poller.
+                if not has_pending_prompts and not updates:
+                    async with self._lock:
+                        self._poller_task = None
+                    return
         except Exception as exc:
             async with self._lock:
                 pending = [item.future for item in self._pending_by_message_id.values()]
@@ -144,6 +168,7 @@ class TelegramPromptClient:
 
     async def _handle_update(self, update: dict[str, Any]) -> None:
         """Process one Telegram update and resolve or reject matching replies."""
+        await self._maybe_hint_on_missing_reply(update)
         matched = await self._match_pending_prompt(update)
         if matched is None:
             return
@@ -173,6 +198,10 @@ class TelegramPromptClient:
                 and not current_pending.future.done()
             ):
                 current_pending.future.set_result(resolution.agent_response)
+                self._pending_by_message_id.pop(prompt_message_id, None)
+                if not self._pending_by_message_id:
+                    self._latest_prompt_message_id = None
+                    self._last_non_reply_hint_after_prompt_message_id = None
                 should_ack = True
 
         if should_ack:
@@ -205,10 +234,51 @@ class TelegramPromptClient:
             pending_prompt = self._pending_by_message_id.get(reply_message_id)
 
         if pending_prompt is None:
+            if await self._warn_on_stale_local_reply(message, reply_to_message):
+                return None
             await self._warn_on_foreign_broker_reply(message, reply_to_message)
             return None
 
         return reply_message_id, pending_prompt, message
+
+    async def _maybe_hint_on_missing_reply(self, update: dict[str, Any]) -> None:
+        """Warn once after the latest local prompt if the user sends a non-reply message."""
+        message = update.get("message")
+        if not isinstance(message, dict):
+            return
+
+        chat = message.get("chat")
+        if not isinstance(chat, dict) or str(chat.get("id")) != self.chat_id:
+            return
+
+        if message.get("from", {}).get("is_bot"):
+            return
+
+        if isinstance(message.get("reply_to_message"), dict):
+            return
+
+        if not self._is_user_reply_candidate(message):
+            return
+
+        async with self._lock:
+            if not self._pending_by_message_id or self._latest_prompt_message_id is None:
+                return
+
+            latest_prompt_message_id = self._latest_prompt_message_id
+            if self._last_non_reply_hint_after_prompt_message_id == latest_prompt_message_id:
+                return
+
+        user_message_id = self._extract_message_id(message)
+        hinted = await self._safe_send_status_message(
+            self.NON_REPLY_HINT_TEXT,
+            reply_to_message_id=user_message_id if user_message_id else None,
+        )
+        if not hinted:
+            return
+
+        async with self._lock:
+            if self._latest_prompt_message_id == latest_prompt_message_id:
+                self._last_non_reply_hint_after_prompt_message_id = latest_prompt_message_id
 
     async def _build_reply_resolution(
         self,
@@ -596,9 +666,32 @@ class TelegramPromptClient:
 
         return f"[telegram {reply_type} reply]\n" + "\n".join(cleaned_lines)
 
+    @staticmethod
+    def _is_user_reply_candidate(message: dict[str, Any]) -> bool:
+        """Decide whether a non-reply Telegram message looks like an attempted answer."""
+        candidate_keys = (
+            "text",
+            "document",
+            "video",
+            "audio",
+            "voice",
+            "animation",
+            "video_note",
+            "sticker",
+            "photo",
+            "location",
+            "venue",
+            "contact",
+            "poll",
+            "dice",
+            "game",
+            "media_group_id",
+        )
+        return any(key in message for key in candidate_keys)
+
     async def _safe_send_status_message(
         self, text: str, *, reply_to_message_id: Optional[int] = None
-    ) -> None:
+    ) -> bool:
         """Best-effort Telegram status/ack message that should not break reply resolution."""
         payload: dict[str, Any] = {
             "chat_id": self.chat_id,
@@ -610,7 +703,8 @@ class TelegramPromptClient:
         try:
             await self._bot_api_request("sendMessage", payload, timeout=20)
         except TelegramPromptError:
-            return
+            return False
+        return True
 
     async def _warn_on_foreign_broker_reply(
         self,
@@ -646,6 +740,41 @@ class TelegramPromptClient:
             reply_to_message_id=reply_message_id if reply_message_id else None,
         )
 
+    async def _warn_on_stale_local_reply(
+        self,
+        message: dict[str, Any],
+        reply_to_message: dict[str, Any],
+    ) -> bool:
+        """Warn when a reply targets one of this broker's own no-longer-active prompts."""
+        if self.broker_identity is None:
+            return False
+
+        replied_text = reply_to_message.get("text")
+        if not isinstance(replied_text, str):
+            # Telegram's nested reply payload does not guarantee `text` at the schema level.
+            # We intentionally stay silent here rather than store prompt history just to recover
+            # stale-reply warnings for that edge case.
+            return False
+
+        broker_reference = self._parse_broker_reference(replied_text)
+        if broker_reference is None or broker_reference[1] != self.broker_identity.broker_id:
+            return False
+
+        stale_prompt_id = self._parse_prompt_id_reference(replied_text)
+
+        if stale_prompt_id is None:
+            prompt_target = "That question"
+        else:
+            prompt_target = f"Prompt [{stale_prompt_id}]"
+
+        warning_text = self.STALE_REPLY_HINT_TEMPLATE.format(prompt_target=prompt_target)
+        user_message_id = self._extract_message_id(message)
+        await self._safe_send_status_message(
+            warning_text,
+            reply_to_message_id=user_message_id if user_message_id else None,
+        )
+        return True
+
     @staticmethod
     def _parse_broker_reference(prompt_text: str) -> Optional[tuple[str, str]]:
         """Extract broker label/id metadata from one broker-formatted prompt."""
@@ -654,6 +783,16 @@ class TelegramPromptClient:
             return None
 
         return match.group(1).strip(), match.group(2).strip()
+
+    @staticmethod
+    def _parse_prompt_id_reference(prompt_text: str) -> Optional[str]:
+        """Extract one prompt id from broker-formatted prompt text."""
+        match = re.search(r"Prompt ID:\s*(\S+)", prompt_text)
+        if not match:
+            return None
+
+        prompt_id = match.group(1).strip()
+        return prompt_id or None
 
     async def _bot_api_request(self, method: str, payload: dict[str, Any], *, timeout: int) -> Any:
         """Issue a Telegram Bot API request through the standard library HTTP stack."""

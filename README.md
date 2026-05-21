@@ -320,6 +320,20 @@ remote deployment work:
 ask-human-for-context-mcp --telegram-broker --telegram "<bot_token> <chat_id>"
 ```
 
+To stop a local broker on Windows for testing or troubleshooting:
+
+```powershell
+Get-CimInstance Win32_Process |
+  Where-Object {
+    $_.Name -like 'python*' -and
+    $_.CommandLine -like '*ask_human_for_context_mcp*' -and
+    $_.CommandLine -like '*--telegram-broker*'
+  } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+```
+
+The next Telegram prompt auto-starts a fresh local broker if one is needed.
+
 In `both` mode:
 
 - macOS and Linux try to close the local dialog when the Telegram reply arrives first
@@ -328,6 +342,8 @@ In `both` mode:
 Telegram reply behavior:
 
 - use Telegram's **Reply** feature on the bot's question message
+- if a local broker is actively waiting and you send a non-reply message, it sends a short warning that the message is ignored and you must use **Reply**
+- if you reply to one of this broker's own older inactive prompt messages, it sends a short warning that the old question is no longer active
 - successful replies get a `✅ Received [Prompt ID]` acknowledgement
 - supported replies include text, single files/media messages up to 20 MB, location, venue, and contact
 - albums / media groups are not supported yet; reply again with a single message instead
