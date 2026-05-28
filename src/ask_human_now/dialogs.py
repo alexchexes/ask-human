@@ -107,14 +107,18 @@ class GUIDialogHandler:
         try:
             import ctypes
 
+            windll = getattr(ctypes, "windll", None)
+            if windll is None:
+                return
+
             try:
-                ctypes.windll.shcore.SetProcessDpiAwareness(2)
+                windll.shcore.SetProcessDpiAwareness(2)
                 return
             except Exception:
                 pass
 
             try:
-                ctypes.windll.user32.SetProcessDPIAware()
+                windll.user32.SetProcessDPIAware()
             except Exception:
                 pass
         except Exception:
@@ -125,9 +129,11 @@ class GUIDialogHandler:
         try:
             import ctypes
 
+            windll = getattr(ctypes, "windll", None)
             dpi = 0
             try:
-                dpi = ctypes.windll.user32.GetDpiForWindow(root.winfo_id())
+                if windll is not None:
+                    dpi = windll.user32.GetDpiForWindow(root.winfo_id())
             except Exception:
                 try:
                     dpi = root.winfo_fpixels("1i")
