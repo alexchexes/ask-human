@@ -88,14 +88,13 @@ def _ensure_state_db(state_dir: Path) -> sqlite3.Connection:
     state_dir.mkdir(parents=True, exist_ok=True)
     db_path = state_dir / BROKER_STATE_DB_FILENAME
     connection = sqlite3.connect(db_path)
-    connection.execute(
-        """
+    schema_sql = """
         CREATE TABLE IF NOT EXISTS broker_state (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         )
         """
-    )
+    connection.execute(schema_sql)
     connection.commit()
     return connection
 
