@@ -2,9 +2,11 @@
 
 import asyncio
 import sys
+from typing import Any, cast
 
 from ask_human_now import server
 from ask_human_now.broker_state import (
+    TelegramBrokerIdentity,
     load_broker_state,
     load_or_create_broker_identity,
     persist_broker_listen_url,
@@ -14,6 +16,7 @@ from ask_human_now.broker_state import (
 from ask_human_now.telegram_broker import (
     build_broker_health_payload,
     build_broker_listen_url,
+    create_telegram_broker_app,
     run_telegram_broker,
 )
 from ask_human_now.telegram_models import TelegramConfig, resolve_telegram_target_key
@@ -79,6 +82,59 @@ def test_build_broker_health_payload_contains_identity_and_url(tmp_path):
     assert payload["listen_url"] == "http://127.0.0.1:7456"
     assert payload["target_key"] == "feedbeef"
     assert "version" in payload
+
+
+def test_broker_prompt_cancels_when_client_disconnects(monkeypatch, tmp_path):
+    """Stop Telegram polling when the local broker client no longer waits."""
+    monkeypatch.setattr(
+        "ask_human_now.telegram_broker.BROKER_DISCONNECT_POLL_SECONDS",
+        0.01,
+    )
+
+    class FakeRequest:
+        def __init__(self):
+            self.disconnect_checks = 0
+
+        async def json(self):
+            return {
+                "prompt_text": "Prompt text",
+                "prompt_id": "QTEST-1234",
+                "timeout_seconds": 300,
+                "download_dir": str(tmp_path),
+            }
+
+        async def is_disconnected(self):
+            self.disconnect_checks += 1
+            return self.disconnect_checks >= 1
+
+    class FakeTelegramClient:
+        def __init__(self):
+            self.cancelled = False
+
+        async def ask_question(self, prompt_text, timeout_seconds, prompt_id, download_dir):
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+    telegram_client = FakeTelegramClient()
+    app = create_telegram_broker_app(
+        TelegramBrokerIdentity("abcd1234", "office"),
+        listen_url="http://127.0.0.1:7456",
+        telegram_client=cast(Any, telegram_client),
+        target_key="feedbeef",
+    )
+    prompts_route = cast(
+        Any,
+        next(route for route in app.routes if getattr(route, "path", None) == "/prompts"),
+    )
+
+    response = asyncio.run(prompts_route.endpoint(FakeRequest()))
+
+    assert response.status_code == 499
+    assert b'"status":"cancelled"' in response.body
+    assert telegram_client.cancelled is True
 
 
 def test_main_runs_telegram_broker_mode(monkeypatch, tmp_path):

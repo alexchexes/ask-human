@@ -2,6 +2,7 @@
 
 import asyncio
 import socket
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Optional
 
@@ -24,6 +25,14 @@ from .telegram_models import (
     resolve_telegram_download_dir,
     resolve_telegram_target_key,
 )
+
+BROKER_DISCONNECT_POLL_SECONDS = 0.25
+
+
+class BrokerPromptClientDisconnected(Exception):
+    """Raised when the local broker client disconnects before a Telegram reply arrives."""
+
+    pass
 
 
 def build_broker_listen_url(host: str, port: int) -> str:
@@ -50,6 +59,29 @@ def build_broker_health_payload(
         "target_key": target_key,
         "version": __version__,
     }
+
+
+async def _wait_for_prompt_or_client_disconnect(
+    request: Request,
+    prompt_task: asyncio.Task[Optional[str]],
+) -> Optional[str]:
+    """Wait for one Telegram prompt while cancelling it if the HTTP client goes away."""
+    while True:
+        done, _pending = await asyncio.wait(
+            {prompt_task},
+            timeout=BROKER_DISCONNECT_POLL_SECONDS,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if prompt_task in done:
+            return await prompt_task
+
+        if await request.is_disconnected():
+            prompt_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await prompt_task
+            raise BrokerPromptClientDisconnected(
+                "Broker prompt client disconnected before Telegram reply arrived."
+            )
 
 
 def create_telegram_broker_app(
@@ -107,12 +139,20 @@ def create_telegram_broker_app(
         download_dir = resolve_telegram_download_dir(download_dir_raw)
         download_dir.mkdir(parents=True, exist_ok=True)
 
-        try:
-            response = await telegram_client.ask_question(
+        prompt_task = asyncio.create_task(
+            telegram_client.ask_question(
                 prompt_text,
                 timeout_seconds,
                 prompt_id,
                 download_dir,
+            )
+        )
+        try:
+            response = await _wait_for_prompt_or_client_disconnect(request, prompt_task)
+        except BrokerPromptClientDisconnected as exc:
+            return JSONResponse(
+                {"status": "cancelled", "error": str(exc)},
+                status_code=499,
             )
         except TelegramPromptError as exc:
             return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)

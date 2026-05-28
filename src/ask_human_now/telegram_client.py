@@ -29,6 +29,10 @@ class TelegramPromptClient:
 
     ISSUE_URL = "https://github.com/alexchexes/ask-human-now/issues"
     NON_REPLY_HINT_TEXT = "⚠️ Message is ignored. Please use Reply on the bot's message."
+    UNMATCHED_REPLY_HINT_TEXT = (
+        "⚠️ Message is ignored. It was not sent as a Reply to the currently active question. "
+        "Please use Reply on the latest Ask Human message."
+    )
     STALE_REPLY_HINT_TEMPLATE = (
         "⚠️ Message is ignored. {prompt_target} is no longer active. Ask the agent to send "
         "a new question."
@@ -50,7 +54,6 @@ class TelegramPromptClient:
         self._pending_by_message_id: dict[int, TelegramPendingPrompt] = {}
         self._poller_task: Optional[asyncio.Task[None]] = None
         self._latest_prompt_message_id: Optional[int] = None
-        self._last_non_reply_hint_after_prompt_message_id: Optional[int] = None
 
     async def ask_question(
         self,
@@ -84,7 +87,6 @@ class TelegramPromptClient:
                 self._pending_by_message_id.pop(message_id, None)
                 if not self._pending_by_message_id:
                     self._latest_prompt_message_id = None
-                    self._last_non_reply_hint_after_prompt_message_id = None
 
     async def _send_prompt(self, prompt_text: str) -> int:
         """Send the outbound Telegram message and return its message id."""
@@ -183,7 +185,7 @@ class TelegramPromptClient:
         reply_to_user_message_id = user_message_id if isinstance(user_message_id, int) else None
 
         if isinstance(resolution, TelegramReplyRejection):
-            await self._safe_send_status_message(
+            await self._send_status_message(
                 resolution.user_message,
                 reply_to_message_id=reply_to_user_message_id,
             )
@@ -201,7 +203,6 @@ class TelegramPromptClient:
                 self._pending_by_message_id.pop(prompt_message_id, None)
                 if not self._pending_by_message_id:
                     self._latest_prompt_message_id = None
-                    self._last_non_reply_hint_after_prompt_message_id = None
                 should_ack = True
 
         if should_ack:
@@ -234,15 +235,19 @@ class TelegramPromptClient:
             pending_prompt = self._pending_by_message_id.get(reply_message_id)
 
         if pending_prompt is None:
+            if await self._message_predates_latest_prompt(message):
+                return None
             if await self._warn_on_stale_local_reply(message, reply_to_message):
                 return None
-            await self._warn_on_foreign_broker_reply(message, reply_to_message)
+            if await self._warn_on_foreign_broker_reply(message, reply_to_message):
+                return None
+            await self._warn_on_unmatched_reply(message)
             return None
 
         return reply_message_id, pending_prompt, message
 
     async def _maybe_hint_on_missing_reply(self, update: dict[str, Any]) -> None:
-        """Warn once after the latest local prompt if the user sends a non-reply message."""
+        """Warn when the user sends a non-reply message while a local prompt is pending."""
         message = update.get("message")
         if not isinstance(message, dict):
             return
@@ -264,21 +269,14 @@ class TelegramPromptClient:
             if not self._pending_by_message_id or self._latest_prompt_message_id is None:
                 return
 
-            latest_prompt_message_id = self._latest_prompt_message_id
-            if self._last_non_reply_hint_after_prompt_message_id == latest_prompt_message_id:
-                return
-
         user_message_id = self._extract_message_id(message)
-        hinted = await self._safe_send_status_message(
+        if await self._message_predates_latest_prompt(message):
+            return
+
+        await self._send_status_message(
             self.NON_REPLY_HINT_TEXT,
             reply_to_message_id=user_message_id if user_message_id else None,
         )
-        if not hinted:
-            return
-
-        async with self._lock:
-            if self._latest_prompt_message_id == latest_prompt_message_id:
-                self._last_non_reply_hint_after_prompt_message_id = latest_prompt_message_id
 
     async def _build_reply_resolution(
         self,
@@ -657,6 +655,20 @@ class TelegramPromptClient:
         message_id = message.get("message_id")
         return message_id if isinstance(message_id, int) else 0
 
+    async def _message_predates_latest_prompt(self, message: dict[str, Any]) -> bool:
+        """Ignore backlog messages that Telegram delivers after a fresh prompt starts."""
+        message_id = self._extract_message_id(message)
+        if not message_id:
+            return False
+
+        async with self._lock:
+            latest_prompt_message_id = self._latest_prompt_message_id
+
+        if latest_prompt_message_id is None:
+            return False
+
+        return message_id <= latest_prompt_message_id
+
     @staticmethod
     def _format_structured_reply(reply_type: str, lines: list[str]) -> str:
         """Format a non-text Telegram reply for the agent as plain text."""
@@ -689,10 +701,10 @@ class TelegramPromptClient:
         )
         return any(key in message for key in candidate_keys)
 
-    async def _safe_send_status_message(
+    async def _send_status_message(
         self, text: str, *, reply_to_message_id: Optional[int] = None
-    ) -> bool:
-        """Best-effort Telegram status/ack message that should not break reply resolution."""
+    ) -> None:
+        """Send a Telegram status/warning message and surface failures to the prompt."""
         payload: dict[str, Any] = {
             "chat_id": self.chat_id,
             "text": text,
@@ -700,8 +712,14 @@ class TelegramPromptClient:
         if reply_to_message_id is not None:
             payload["reply_to_message_id"] = reply_to_message_id
 
+        await self._bot_api_request("sendMessage", payload, timeout=20)
+
+    async def _safe_send_status_message(
+        self, text: str, *, reply_to_message_id: Optional[int] = None
+    ) -> bool:
+        """Best-effort Telegram status/ack message after a successful reply was captured."""
         try:
-            await self._bot_api_request("sendMessage", payload, timeout=20)
+            await self._send_status_message(text, reply_to_message_id=reply_to_message_id)
         except TelegramPromptError:
             return False
         return True
@@ -710,22 +728,22 @@ class TelegramPromptClient:
         self,
         message: dict[str, Any],
         reply_to_message: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         """Warn if this broker consumed a reply that appears intended for another broker."""
         if self.broker_identity is None:
-            return
+            return False
 
         replied_text = reply_to_message.get("text")
         if not isinstance(replied_text, str):
-            return
+            return False
 
         broker_reference = self._parse_broker_reference(replied_text)
         if broker_reference is None:
-            return
+            return False
 
         foreign_label, foreign_id = broker_reference
         if foreign_id == self.broker_identity.broker_id:
-            return
+            return False
 
         reply_message_id = self._extract_message_id(message)
         warning_text = (
@@ -735,10 +753,26 @@ class TelegramPromptClient:
             f"or apps at the same time, avoid doing that. Otherwise, please open an issue: "
             f"{self.ISSUE_URL}"
         )
-        await self._safe_send_status_message(
+        await self._send_status_message(
             warning_text,
             reply_to_message_id=reply_message_id if reply_message_id else None,
         )
+        return True
+
+    async def _warn_on_unmatched_reply(self, message: dict[str, Any]) -> bool:
+        """Warn for replies that target no prompt this broker can currently match."""
+        if message.get("from", {}).get("is_bot"):
+            return False
+
+        if not self._is_user_reply_candidate(message):
+            return False
+
+        user_message_id = self._extract_message_id(message)
+        await self._send_status_message(
+            self.UNMATCHED_REPLY_HINT_TEXT,
+            reply_to_message_id=user_message_id if user_message_id else None,
+        )
+        return True
 
     async def _warn_on_stale_local_reply(
         self,
@@ -751,9 +785,6 @@ class TelegramPromptClient:
 
         replied_text = reply_to_message.get("text")
         if not isinstance(replied_text, str):
-            # Telegram's nested reply payload does not guarantee `text` at the schema level.
-            # We intentionally stay silent here rather than store prompt history just to recover
-            # stale-reply warnings for that edge case.
             return False
 
         broker_reference = self._parse_broker_reference(replied_text)
@@ -769,7 +800,7 @@ class TelegramPromptClient:
 
         warning_text = self.STALE_REPLY_HINT_TEMPLATE.format(prompt_target=prompt_target)
         user_message_id = self._extract_message_id(message)
-        await self._safe_send_status_message(
+        await self._send_status_message(
             warning_text,
             reply_to_message_id=user_message_id if user_message_id else None,
         )

@@ -326,6 +326,8 @@ Telegram reply behavior:
 - use Telegram's Reply feature on the bot's question message
 - if a local broker is actively waiting and you send a non-reply message, it sends
   a short warning that the message is ignored and you must use Reply
+- if you reply to a message that is not the currently active question, it sends
+  a warning instead of silently consuming the reply
 - if you reply to one of this broker's own older inactive prompt messages, it sends
   a short warning that the old question is no longer active
 - successful replies get a `Received [Prompt ID]` acknowledgement
@@ -333,8 +335,10 @@ Telegram reply behavior:
   location, venue, and contact
 - albums/media groups are not supported yet; reply again with a single message
 - files are downloaded locally and returned to the agent as local paths
-- replies that appear intended for another broker instance can trigger a warning
+- replies that appear intended for another broker instance trigger a warning
   instead of being silently misrouted
+- Telegram delivery failures for the initial question or retry/warning messages
+  are returned to the agent as prompt errors
 
 ## Telegram Bot Icons
 
