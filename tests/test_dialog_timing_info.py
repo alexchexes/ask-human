@@ -44,7 +44,7 @@ def test_tool_keeps_default_prompt_shape_without_timing_info(monkeypatch):
     monkeypatch.setattr(server, "dialog_handler", stub)
     monkeypatch.setattr(server, "show_timing_info", False)
 
-    result = asyncio.run(server.asking_user_missing_context("Question?"))
+    result = asyncio.run(server.ask_human("Question?"))
 
     assert result == "✅ User response: ok"
     assert stub.timeout == server.DEFAULT_DIALOG_TIMEOUT_SECONDS
@@ -109,7 +109,7 @@ def test_tool_appends_timing_info_when_enabled(monkeypatch):
     )
 
     result = asyncio.run(
-        server.asking_user_missing_context(
+        server.ask_human(
             "Should I keep the current API shape?",
             "There are two valid implementation paths and the choice is user-facing.",
         )
@@ -141,7 +141,7 @@ def test_tool_uses_consistent_question_label_without_context(monkeypatch):
         "Answer until: 10.05.2026 09:31:30 (client may time out sooner)",
     )
 
-    result = asyncio.run(server.asking_user_missing_context("Question without context?"))
+    result = asyncio.run(server.ask_human("Question without context?"))
 
     assert result == "✅ User response: ok"
     separator = "─" * 40

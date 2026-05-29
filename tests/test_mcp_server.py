@@ -18,8 +18,10 @@ def test_mcp_server_exists():
     assert mcp.name == "ask-human"
 
 
-def test_asking_user_missing_context_tool():
+def test_ask_human_tool():
     """Test that the main tool function exists."""
-    from ask_human_now.server import asking_user_missing_context
+    from ask_human_now import server
+    from ask_human_now.server import ask_human
 
-    assert callable(asking_user_missing_context)
+    assert callable(ask_human)
+    assert set(server.mcp._tool_manager._tools) == {"ask_human"}

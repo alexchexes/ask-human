@@ -25,7 +25,7 @@ class UserPromptError(Exception):
 
 
 class GUIDialogHandler:
-    """Cross-platform GUI dialog handler for asking humans for context.
+    """Cross-platform GUI dialog handler for asking humans for input.
 
     Provides native GUI dialogs on macOS (osascript), Linux (zenity), and Windows (tkinter).
     Falls back to terminal input if GUI is unavailable.

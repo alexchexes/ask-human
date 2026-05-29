@@ -22,8 +22,8 @@ environment:
 - ambiguous requirements that should not be guessed
 - offline or real-world context that only the human can provide
 
-Ask Human Now exposes one MCP tool, `asking_user_missing_context`, so the agent
-can ask directly instead of silently choosing.
+Ask Human Now exposes one MCP tool, `ask_human`, so the agent can ask directly
+instead of silently choosing.
 
 ## Features
 
@@ -352,9 +352,9 @@ easy to distinguish on mobile.
 
 ## Tool Reference
 
-### `asking_user_missing_context`
+### `ask_human`
 
-Ask the user for missing context during agent workflows.
+Ask the human for input during agent workflows.
 
 Parameters:
 
@@ -372,7 +372,7 @@ Returns:
 Example tool call:
 
 ```python
-asking_user_missing_context(
+ask_human(
     question="Should this import overwrite an existing session or stop?",
     context="Both behaviors are possible, but choosing wrong could lose user data."
 )

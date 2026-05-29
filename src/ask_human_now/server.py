@@ -185,12 +185,12 @@ async def get_user_input_from_configured_channel(
 
 
 @mcp.tool()
-async def asking_user_missing_context(question: str, context: str = "") -> str:
-    """Ask the user to fill missing context or knowledge gaps during research and development.
+async def ask_human(question: str, context: str = "") -> str:
+    """Ask the human for input during an agent workflow.
 
-    This tool enables AI assistants to pause workflows when they encounter missing context,
+    This tool enables AI assistants to pause workflows when they encounter a decision,
     need clarification on implementation choices, or require understanding of preferred
-    approaches. Use this when conducting research and you need user input to proceed effectively.
+    approaches. Use this when conducting work and you need user input to proceed effectively.
 
     Common use cases:
     - Multiple valid implementation approaches exist (ask user for preference)
@@ -200,7 +200,7 @@ async def asking_user_missing_context(question: str, context: str = "") -> str:
     - Need to understand existing codebase patterns or conventions
 
     Args:
-        question: The specific question about missing context (max 1000 characters)
+        question: The specific question to ask the human (max 1000 characters)
         context: Background info explaining why this context is needed (max 2000 characters)
 
     Returns:

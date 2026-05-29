@@ -41,7 +41,7 @@ def test_tool_parameter_validation():
     """Test tool parameter validation as described in README."""
     import asyncio
 
-    from ask_human_now.server import asking_user_missing_context
+    from ask_human_now.server import ask_human
 
     # This is an async function, so we need to test it properly
-    assert asyncio.iscoroutinefunction(asking_user_missing_context)
+    assert asyncio.iscoroutinefunction(ask_human)

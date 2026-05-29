@@ -654,9 +654,7 @@ def test_tool_uses_telegram_only_mode_without_dialog(monkeypatch):
     monkeypatch.setattr(server, "show_timing_info", False)
     monkeypatch.setattr(server, "dialog_timeout_seconds", 300)
 
-    result = asyncio.run(
-        server.asking_user_missing_context("Where should I deploy?", "Need a quick answer.")
-    )
+    result = asyncio.run(server.ask_human("Where should I deploy?", "Need a quick answer."))
 
     assert result == "✅ User response: telegram answer"
     assert stub_telegram.timeout == 300
@@ -717,7 +715,7 @@ def test_both_mode_adds_windows_warning_and_threads_dialog(monkeypatch):
     monkeypatch.setattr(server, "show_timing_info", False)
     monkeypatch.setattr(server, "dialog_timeout_seconds", 300)
 
-    result = asyncio.run(server.asking_user_missing_context("Q?", "Context text."))
+    result = asyncio.run(server.ask_human("Q?", "Context text."))
 
     assert result == "✅ User response: telegram answer"
     assert stub_dialog.calls[0]["run_in_thread"] is True
@@ -772,7 +770,7 @@ def test_both_mode_cancels_linux_dialog_when_telegram_wins(monkeypatch):
     monkeypatch.setattr(server, "show_timing_info", False)
     monkeypatch.setattr(server, "dialog_timeout_seconds", 300)
 
-    result = asyncio.run(server.asking_user_missing_context("Q?", "Context text."))
+    result = asyncio.run(server.ask_human("Q?", "Context text."))
 
     assert result == "✅ User response: telegram answer"
     assert stub_dialog.cancel_event is not None

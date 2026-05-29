@@ -57,7 +57,7 @@ def test_tool_uses_configured_dialog_timeout(monkeypatch):
     monkeypatch.setattr(server, "dialog_handler", stub)
     monkeypatch.setattr(server, "dialog_timeout_seconds", 1200)
 
-    result = asyncio.run(server.asking_user_missing_context("Question?"))
+    result = asyncio.run(server.ask_human("Question?"))
 
     assert result == "✅ User response: ok"
     assert stub.timeout == 1200
