@@ -143,7 +143,7 @@ class TelegramBrokerClient:
         command = [
             sys.executable,
             "-m",
-            "ask_human_now",
+            "ask_human",
             "--telegram-broker",
             "--telegram",
             f"{self.telegram_target.bot_token} {self.telegram_target.chat_id}",

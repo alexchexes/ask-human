@@ -1,20 +1,43 @@
-# Ask Human Now
+# Ask Human MCP
 
-> MCP server for letting an AI agent ask a human for input through a local dialog,
-> Telegram, or both.
+<!-- mcp-name: io.github.alexchexes/ask-human -->
+
+Simple [MCP](https://modelcontextprotocol.io/) server that lets AI agents ask humans for input and wait for an answer.
+
+Supports Telegram (including files) and local OS dialogs.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io/)
 
-Ask Human Now gives MCP-capable agents a focused tool for cases where guessing is
-the wrong move. The agent can pause, show the question and relevant context, wait
-for your answer, then continue the same workflow.
+It gives MCP-capable agents a focused tool for cases where guessing is the wrong move.
+The agent can pause, show the question and relevant context, wait for your answer,
+then continue the same workflow.
 
-## What It Solves
+<!-- TOC depthfrom:2 depthto:2 -->
 
-Agents often hit decisions that are not knowable from the repository or local
-environment:
+- [Why](#why)
+- [Features](#features)
+- [Installation](#installation)
+- [MCP client setup](#mcp-client-setup)
+- [AGENTS.md instructions](#agentsmd-instructions)
+- [Configuration](#configuration)
+- [Tool reference](#tool-reference)
+- [Development](#development)
+- [Security and Privacy](#security-and-privacy)
+- [License](#license)
+
+<!-- /TOC -->
+
+## Why
+
+Despite agents improving every month, they still tend to make assumptions and produce "perfectly working nonsense" when all they needed to do was pause and ask the human who issued the task for clarification.
+
+Codex (as of May 2026) even has this in its system instructions:
+
+> ... strongly prefer making **reasonable assumptions** and executing the user's request **rather than stopping to ask questions**.
+
+In general, agents often hit decisions that are not knowable from the repository or local environment:
 
 - product or design preferences
 - risky implementation tradeoffs
@@ -22,123 +45,119 @@ environment:
 - ambiguous requirements that should not be guessed
 - offline or real-world context that only the human can provide
 
-Ask Human Now exposes one MCP tool, `ask_human`, so the agent can ask directly
-instead of silently choosing.
+_Ask Human_ exposes the `ask_human` MCP tool, so the agent can ask directly instead of silently making assumptions.
+
+Another useful application is enabling an "interactive mode" when an agent needs to ask several follow-up questions while working on a task. You prompt your agent:
+
+> \- Using the `ask_human` tool, guide me step by step through BIOS debug on my other laptop. I will send you photos of the screen after each step
+
+And Codex (or your agent of choice) will do just that, because it now has a well-suited tool for that workflow.
 
 ## Features
 
 - Native local dialogs on macOS, Linux, and Windows
-- Optional Telegram response channel for mobile/away-from-keyboard replies
-- `both` mode, where local dialog and Telegram race and the first reply wins
-- Local Telegram broker so same-machine concurrent agent sessions do not compete
-  for one bot update stream
-- Optional timing metadata showing when the prompt was issued and when the local
-  dialog times out
-- Configurable dialog title, defaulting to `Agent asks...`
-- Telegram support for text, files/media up to 20 MB, location, venue, and contact
-- Distinctive packaged icons for dialogs and optional Telegram bot branding
+- Optional Telegram response channel for mobile/away-from-keyboard replies with support for files and other media (up to 20 MB)
+- Configurable timeouts. When the MCP tool is called, the agent waits for your reply for as long as the client allows. Tested up to 24h with Codex.
 
 ## Installation
 
-### uvx
+### Recommended: No installation, use uvx
 
-Because the PyPI distribution name is `ask-human-now` and the CLI command is
-`ask-human`, run it with `--from`:
+`uvx` is the recommended way to run Ask Human from an MCP client. It does
+not require a prior install: it downloads the `ask-human` package on first
+invocation, caches it, and runs it in an isolated environment.
 
-```json
-{
-  "mcpServers": {
-    "ask-human": {
-      "command": "uvx",
-      "args": ["--from", "ask-human-now", "ask-human", "--transport", "stdio"]
-    }
-  }
-}
+Any MCP client that can launch a stdio command can use it that way. Example MCP configuration shape:
+
+```text
+command: uvx
+args: ask-human --transport stdio
 ```
 
-### pip
+See [MCP Client Setup](#mcp-client-setup) for exact setup with `uvx` for popular clients.
+
+> To manually run the CLI directly:
+>
+> ```bash
+> uvx ask-human --help
+> ```
+
+### Persistent Install via `pipx` or `pip`
+
+If you prefer a persistent CLI install instead of `uvx`, you can use `pipx` or `pip install --user`:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install ask-human-now
-ask-human --help
+pipx install ask-human
 ```
 
-Then point your MCP client at the installed command:
+or `pip`:
 
-```json
-{
-  "mcpServers": {
-    "ask-human": {
-      "command": "ask-human",
-      "args": ["--transport", "stdio"]
-    }
-  }
-}
+```bash
+python -m pip install --user ask-human
 ```
 
-## MCP Client Setup
+For the `pip` path, **make sure your Python user scripts directory is on `PATH`.**
 
-Always check your client documentation for the latest config format:
+After a persistent install, MCP clients can run the installed executable directly. The MCP config shape is:
 
-- Codex MCP docs: <https://developers.openai.com/codex/mcp>
-- Claude Code MCP docs: <https://docs.anthropic.com/en/docs/claude-code/mcp>
-- Cursor MCP docs: <https://docs.cursor.com/context/model-context-protocol>
+```text
+command: ask-human
+args: --transport stdio
+```
+
+## MCP client setup
+
+Codex, Claude Code, Cursor, and other MCP-capable agent clients can use Ask Human by adding the MCP server to their config.
+
+> **NOTE**: Examples below use `ask-human` consistently as the package name, executable name, and MCP server name. Keeping those names aligned is intentional and recommended, though the MCP server name is configurable in your client.
+
+> **NOTE**: It is also recommended to increase your client's MCP tool-call timeout as much as practical, so you avoid a situation where the agent asks something important, the MCP call times out, and the agent goes back to assumptions / inferring.
 
 ### Codex
 
-Add a server to `~/.codex/config.toml`:
+> Codex MCP docs: <https://developers.openai.com/codex/mcp>
+
+#### Using Codex CLI `mcp add`:
+
+Using `uvx` (no install step):
+
+```bash
+codex mcp add ask-human -- uvx ask-human --transport stdio
+```
+
+Or if you installed using `pip` / `pipx`:
+
+```bash
+codex mcp add ask-human -- ask-human --transport stdio
+```
+
+#### Or manually add `config.toml` entry:
+
+Open your `~/.codex/config.toml` and add a new entry:
 
 ```toml
 [mcp_servers.ask-human]
-command = "ask-human"
-args = ["--transport", "stdio", "--dialog-title", "Codex Needs Input"]
-tool_timeout_sec = 1200
+command = "uvx"
+args = ["ask-human", "--transport", "stdio"]
 ```
 
-For Telegram and longer waits:
+Configuration is done by adding other `args`; see [Configuration](#configuration) for available options.
 
-```toml
-[mcp_servers.ask-human]
-command = "ask-human"
-args = [
-  "--transport", "stdio",
-  "--dialog-title", "Codex Needs Input",
-  "--timeout-seconds", "86400",
-  "--show-timing-info",
-  "--response-channel", "both",
-  "--telegram", "<bot_token> <chat_id>",
-]
-tool_timeout_sec = 86400
-```
-
-Restart the Codex session after changing MCP config. To make Codex prefer the
-tool for risky ambiguity, add an instruction such as:
-
-```md
-If a required fact or preference cannot be discovered locally and a wrong
-assumption could affect correctness, safety, architecture, or user intent, use
-the `ask-human` tool before proceeding.
-```
+Restart any active Codex sessions after adding the MCP server or changing config. If you use the VS Code extension, use "Reload Window" or "Restart Extension Host".
 
 ### Claude Code
+
+- Claude Code MCP docs: <https://docs.anthropic.com/en/docs/claude-code/mcp>
 
 One typical setup is to add the server through the Claude Code MCP command:
 
 ```bash
-claude mcp add --transport stdio ask-human -- uvx --from ask-human-now ask-human --transport stdio
-```
-
-If your Claude Code version uses a different MCP configuration format, use the
-official docs linked above and keep the command/arguments the same:
-
-```text
-command: uvx
-args: --from ask-human-now ask-human --transport stdio
+claude mcp add --transport stdio ask-human -- uvx ask-human --transport stdio
 ```
 
 ### Cursor
+
+- Cursor MCP docs: <https://docs.cursor.com/context/model-context-protocol>
 
 Add this to your Cursor MCP config:
 
@@ -147,7 +166,7 @@ Add this to your Cursor MCP config:
   "mcpServers": {
     "ask-human": {
       "command": "uvx",
-      "args": ["--from", "ask-human-now", "ask-human", "--transport", "stdio"]
+      "args": ["ask-human", "--transport", "stdio"]
     }
   }
 }
@@ -160,10 +179,10 @@ Add this to your Cursor MCP config:
   "mcpServers": {
     "ask-human-dev": {
       "command": "python",
-      "args": ["-m", "ask_human_now", "--transport", "stdio"],
-      "cwd": "/path/to/ask-human-now",
+      "args": ["-m", "ask_human", "--transport", "stdio"],
+      "cwd": "/path/to/ask-human",
       "env": {
-        "PYTHONPATH": "/path/to/ask-human-now/src"
+        "PYTHONPATH": "/path/to/ask-human/src"
       }
     }
   }
@@ -173,89 +192,102 @@ Add this to your Cursor MCP config:
 The included `mcp-server-config.json` has copyable examples for installed,
 `uvx`, and local-dev usage.
 
-## Command Reference
+## AGENTS.md instructions
 
-### Transports
+To make an agent prefer asking questions via this tool instead of making assumptions, add an instruction to your global or workspace `AGENTS.md` file, such as:
 
-STDIO is the default and is what most local MCP clients use:
-
-```bash
-ask-human --transport stdio
+```md
+If a required fact or preference cannot be discovered locally and a wrong
+assumption could affect correctness, safety, architecture, or user intent, use
+the `ask_human` tool before proceeding.
 ```
-
-SSE is available for clients that connect over HTTP:
-
-```bash
-ask-human --transport sse --host 0.0.0.0 --port 8080
-```
-
-### Dialog Title
-
-The default dialog title is `Agent asks...`.
-
-```bash
-ask-human --transport stdio --dialog-title "Codex Needs Input"
-```
-
-### Timeout
-
-The local dialog timeout defaults to 120 seconds.
-
-```bash
-ask-human --transport stdio --timeout-seconds 1200
-```
-
-MCP clients may enforce their own tool-call timeout. If your client supports a
-tool timeout setting, set it to at least the same value as `--timeout-seconds`;
-otherwise the client may stop waiting before Ask Human Now does.
-
-### Timing Metadata
-
-Use `--show-timing-info` to include compact timing metadata in dialogs and
-Telegram prompts:
-
-```bash
-ask-human --transport stdio --show-timing-info
-```
-
-The timing text uses the current OS short date/time format where available.
-
-### Response Channels
-
-Use `--response-channel` to choose where replies are collected:
-
-- `dialog`: local native dialog only, default
-- `telegram`: Telegram only
-- `both`: local dialog and Telegram at the same time; first reply wins
-
-```bash
-ask-human --transport stdio --response-channel telegram --telegram "<bot_token> <chat_id>"
-```
-
-Optional Telegram file download directory:
-
-```bash
-ask-human \
-  --transport stdio \
-  --response-channel telegram \
-  --telegram "<bot_token> <chat_id>" \
-  --telegram-download-dir "~/Downloads/ask-human"
-```
-
-`--telegram-download-dir` defaults to a folder under the system temp directory.
-It supports `~`, environment variables such as `%USERPROFILE%`, and `{cwd}`.
 
 <details>
-<summary>Create a Telegram bot and find the chat id</summary>
+
+<summary><b>Full tested AGENTS.md instruction example</b></summary>
+
+```md
+## Ask human tool
+
+If a missing fact, design choice, or user preference is not 100% clear, and a wrong
+assumption could materially affect correctness, safety, architecture, or user intent,
+use `ask_human` mcp/tool before proceeding.
+
+If the tool is unavailable or times out without a human response, do not proceed
+and do not roll back changes unless it is absolutely necessary (e.g. a broken
+live/production system, runaway resource consumption, etc.). Instead, stop, report
+the current state, repeat the context and question, and let the user answer normally.
+
+Do not optimize for completing the task in one uninterrupted run if clarification
+would lead to a better decision. Making correct design decisions is more important
+than finishing a subtask without interruptions.
+
+Use `ask_human` especially for ambiguous requirements, risky tradeoffs, irreversible
+actions, external side effects, and situations where multiple reasonable approaches
+exist and the preferred one is not 100% clear. Keep the question concise where possible,
+but include necessary context details
+so the user is properly informed.
+
+When a task requires many decisions from the user, or when the user explicitly asks
+you to ask questions or use `ask_human` tool, do not limit that to the initial planning phase.
+Continue talking with the user via that tool during implementation whenever a new assumption,
+design choice, external value, or behavior decision appears that was not already answered.
+Do not treat early answers as broad permission to infer the remaining details silently.
+
+## Contradictions and questionable requests
+
+If the user's request appears to contradict earlier instructions, previous work,
+the current state, or a known constraint, do not silently choose one interpretation.
+Briefly explain the conflict using `ask_human`.
+
+If the request seems technically wrong, unsafe, or likely to cause unintended consequences,
+always use `ask_human` to confirm that the user really means it before proceeding.
+
+Common source of confusion: the user may think they're on one branch or workspace
+when they're actually on another.
+```
+
+</details>
+
+Even a carefully written `AGENTS.md` can still hit intrinsic agent limitations: system instructions may override it, or the agent may have learned to provide a "complete solution" instead of asking questions. Whatever the reason, the agent may sometimes ignore the instruction to use this tool in the intended scenarios (true at least for Codex as of May 2026).
+
+To increase the chance that the agent asks before making a wrong assumption, add a reminder like this directly to your prompt when setting a task:
+
+```
+...<your normal prompt>...
+
+P.S. Remember to use the ask_human tool whenever you hit any ambiguity, uncertainty,
+non-obvious implications, something that is not 100% explicitly agreed, or for any
+other reason requires or might require my input. Never infer or make assumptions
+(even "conservative") in such cases, use `ask_human` tool instead (or stop if tool
+is unavailable or does not return usable output).
+```
+
+## Configuration
+
+### Telegram as response channel
+
+To make your agent message you via Telegram when it needs your input, add:
+
+```sh
+--telegram "<bot_token> <chat_id>" --response-channel telegram # or "--response-channel both"
+```
+
+to the MCP config args list.
+
+When you receive an agent prompt, you can respond with text, a photo, another media/file attachment (up to 20 MB), location, etc. Voice auto-transcription is not supported yet. A capable agent will be able to inspect supported files/media. Files are saved to a temporary directory; see [Telegram file download directory](#telegram-file-download-directory).
+
+<details>
+<summary>How to create a Telegram bot and obtain chat ID</summary>
 
 1. Open Telegram and message `@BotFather`.
 2. Run `/newbot` and follow BotFather's prompts.
 3. Copy the bot token.
 4. Send any message to your new bot.
-5. Open this URL in a browser, replacing `<bot_token>`:
+5. Open this URL in a browser, replacing `<BOT_TOKEN>`:
 
    ```text
-   https://api.telegram.org/bot<bot_token>/getUpdates
+   https://api.telegram.org/bot<BOT_TOKEN>/getUpdates
    ```
 
 6. Find `message.chat.id` in the JSON response. That is the `<chat_id>`.
@@ -266,7 +298,14 @@ call `getUpdates` and use the group's `chat.id`.
 
 </details>
 
-## Telegram Broker
+See [Icons for Telegram bot](https://github.com/alexchexes/ask-human/tree/main/src/ask_human/assets/telegram).
+
+**Important:**
+If you run agents on different machines or inside different VMs, you must use a **different Telegram bot token for each machine/environment**. That limitation is due to how Telegram's `getUpdates` mechanism works. Using the same bot for different environments may be buggy and unreliable.
+
+<details>
+
+<summary>How Telegram broker works</summary>
 
 Telegram delivery uses a local auto-started broker process instead of letting
 each agent session poll `getUpdates` independently.
@@ -307,7 +346,7 @@ Stop a local broker on Windows for testing or troubleshooting:
 Get-CimInstance Win32_Process |
   Where-Object {
     $_.Name -like 'python*' -and
-    $_.CommandLine -like '*ask_human_now*' -and
+    $_.CommandLine -like '*ask_human*' -and
     $_.CommandLine -like '*--telegram-broker*'
   } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
@@ -340,17 +379,146 @@ Telegram reply behavior:
 - Telegram delivery failures for the initial question or retry/warning messages
   are returned to the agent as prompt errors
 
-## Telegram Bot Icons
+</details>
 
-Packaged icons are available under `src/ask_human_now/assets/`:
+### Config stubs
 
-- `icon-color-round.png`
-- `icon-color-round-alt.png`
+#### Codex config stub:
 
-You can use either as a Telegram bot profile photo so Ask Human Now prompts are
-easy to distinguish on mobile.
+Template for your `~/.codex/config.toml`:
 
-## Tool Reference
+```toml
+[mcp_servers.ask-human]
+command = "uvx"
+args = [
+  "ask-human",
+  "--transport", "stdio",
+  "--timeout-seconds", "86400", # tool internal timeout; 86400 = 24 h
+  "--show-timing-info", # show remaining time to answer
+  "--response-channel", "both", # dialog | telegram | both
+  "--telegram", "<bot_token> <chat_id>", # creds for your personal tg bot used ONLY ON THIS MACHINE
+  "--dialog-title", "Codex asks..." # Custom OS dialogue title
+]
+# make sure client tool call timeout is same as or greater than tool internal timeout
+tool_timeout_sec = 86400 # 24 h
+```
+
+#### Claude Code config stub:
+
+Project-scoped `.mcp.json` equivalent:
+
+```json
+{
+  "mcpServers": {
+    "ask-human": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "ask-human",
+        "--transport", "stdio",
+        "--timeout-seconds", "86400",
+        "--show-timing-info",
+        "--response-channel", "both",
+        "--telegram", "<bot_token> <chat_id>",
+        "--dialog-title", "Claude asks..."
+      ],
+      "timeout": 86400000
+    }
+  }
+}
+```
+
+`timeout` is Claude Code's per-server tool-call timeout in milliseconds.
+
+#### Cursor config stub:
+
+Project-local `.cursor/mcp.json` or global `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "ask-human": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "ask-human",
+        "--transport", "stdio",
+        "--timeout-seconds", "86400",
+        "--show-timing-info",
+        "--response-channel", "both",
+        "--telegram", "<bot_token> <chat_id>",
+        "--dialog-title", "Cursor asks..."
+      ]
+    }
+  }
+}
+```
+
+### Command args reference
+
+#### Transports
+
+STDIO is the default and is what most local MCP clients use:
+
+```bash
+ask-human --transport stdio
+```
+
+SSE is available for clients that connect over HTTP:
+
+```bash
+ask-human --transport sse --host 0.0.0.0 --port 8080
+```
+
+#### Timeout
+
+The internal timeout that affects OS dialog and Telegram prompts. Defaults to 120 seconds.
+
+```bash
+ask-human --transport stdio --timeout-seconds 1200
+```
+
+MCP clients may enforce their own tool-call timeout. If your client supports a
+tool timeout setting, set it to at least the same value as `--timeout-seconds`;
+otherwise the client may stop waiting before Ask Human does.
+
+#### Response channels
+
+Use `--response-channel` to choose where replies are collected:
+
+- `dialog`: local native dialog only, default
+- `telegram`: Telegram only
+- `both`: local dialog and Telegram at the same time; first reply wins
+
+```bash
+ask-human --transport stdio --response-channel telegram --telegram "<bot_token> <chat_id>"
+```
+
+#### Telegram file download directory:
+
+```bash
+--telegram-download-dir "~/Downloads/ask-human"
+```
+
+Defaults to a folder under the system temp directory. Supports `~`, environment variables such as `%USERPROFILE%`, and `{cwd}`.
+
+#### Timing metadata
+
+Use `--show-timing-info` to include compact timing metadata showing when the prompt was issued and when the tool will time out:
+
+```bash
+ask-human --transport stdio --show-timing-info
+```
+
+#### OS dialog title
+
+The default dialog title is `Agent asks...`.
+
+```bash
+ask-human --transport stdio --dialog-title "Codex Needs Input"
+```
+
+## Tool reference
 
 ### `ask_human`
 
@@ -361,7 +529,7 @@ Parameters:
 - `question` (string, required): specific question, max 1000 characters
 - `context` (string, optional): short background, max 2000 characters
 
-Returns:
+Returns one of:
 
 - `User response: ...` when the user answers
 - `Empty response received` when the user clicks OK without text
@@ -380,9 +548,8 @@ ask_human(
 
 ## Development
 
-Requirements:
+Requires Python 3.10+, and also:
 
-- Python 3.10+
 - macOS: `osascript`
 - Linux: `zenity`
 - Windows: `tkinter`
@@ -412,45 +579,16 @@ python -m build
 python -m twine check dist/*
 ```
 
-Project structure:
-
-```text
-ask-human-now/
-├── src/ask_human_now/
-│   ├── assets/
-│   ├── broker_state.py
-│   ├── dialogs.py
-│   ├── prompt_formatting.py
-│   ├── server.py
-│   ├── telegram_broker.py
-│   ├── telegram_broker_client.py
-│   ├── telegram_client.py
-│   └── telegram_models.py
-├── tests/
-├── pyproject.toml
-└── README.md
-```
-
-## Security And Privacy
+## Security and Privacy
 
 - Local dialog prompts stay on your machine.
 - Telegram prompts and replies go through Telegram when that channel is enabled.
 - Telegram files are downloaded to a local directory and returned as paths.
 - Bot tokens should be treated as secrets.
-- Ask Human Now does not run a remote server by default.
-
-## Fork And Attribution
-
-Ask Human Now is a maintained fork of the original
-`ask-human-for-context-mcp` project. The upstream MIT license notice is retained
-in [LICENSE](LICENSE), and this fork adds new package identity, Telegram support,
-local broker coordination, additional configuration, and release infrastructure.
+- Ask Human does not run a remote server by default.
 
 ## License
 
 MIT License. See [LICENSE](LICENSE).
 
-## Support
-
-- Issues: <https://github.com/alexchexes/ask-human-now/issues>
-- Model Context Protocol: <https://modelcontextprotocol.io/>
+Based on [galprz/ask-human-for-context](https://github.com/galprz/ask-human-for-context).

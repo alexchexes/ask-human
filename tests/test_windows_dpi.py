@@ -5,7 +5,7 @@ import sys
 import types
 from typing import Any, cast
 
-from ask_human_now.server import GUIDialogHandler
+from ask_human.server import GUIDialogHandler
 
 
 def test_enable_windows_dpi_awareness_prefers_shcore(monkeypatch):

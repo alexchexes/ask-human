@@ -1,1 +1,1 @@
-"""Tests for ask-human-now package."""
+"""Tests for ask-human package."""

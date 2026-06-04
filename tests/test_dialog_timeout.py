@@ -5,8 +5,8 @@ import os
 import subprocess
 import sys
 
-from ask_human_now import server
-from ask_human_now.server import (
+from ask_human import server
+from ask_human.server import (
     DEFAULT_DIALOG_TIMEOUT_SECONDS,
     GUIDialogHandler,
 )
@@ -94,7 +94,7 @@ def test_help_mentions_timeout_option():
     )
 
     result = subprocess.run(
-        [sys.executable, "-m", "ask_human_now", "--help"],
+        [sys.executable, "-m", "ask_human", "--help"],
         capture_output=True,
         text=True,
         cwd=repo_root,

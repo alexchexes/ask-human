@@ -4,8 +4,8 @@ import asyncio
 import sys
 from typing import Any, cast
 
-from ask_human_now import server
-from ask_human_now.broker_state import (
+from ask_human import server
+from ask_human.broker_state import (
     TelegramBrokerIdentity,
     load_broker_state,
     load_or_create_broker_identity,
@@ -13,13 +13,13 @@ from ask_human_now.broker_state import (
     resolve_broker_state_dir,
     resolve_target_broker_state_dir,
 )
-from ask_human_now.telegram_broker import (
+from ask_human.telegram_broker import (
     build_broker_health_payload,
     build_broker_listen_url,
     create_telegram_broker_app,
     run_telegram_broker,
 )
-from ask_human_now.telegram_models import TelegramConfig, resolve_telegram_target_key
+from ask_human.telegram_models import TelegramConfig, resolve_telegram_target_key
 
 
 def test_broker_identity_is_stable_for_one_state_dir(tmp_path):
@@ -87,7 +87,7 @@ def test_build_broker_health_payload_contains_identity_and_url(tmp_path):
 def test_broker_prompt_cancels_when_client_disconnects(monkeypatch, tmp_path):
     """Stop Telegram polling when the local broker client no longer waits."""
     monkeypatch.setattr(
-        "ask_human_now.telegram_broker.BROKER_DISCONNECT_POLL_SECONDS",
+        "ask_human.telegram_broker.BROKER_DISCONNECT_POLL_SECONDS",
         0.01,
     )
 
@@ -211,25 +211,25 @@ def test_run_telegram_broker_exits_cleanly_on_keyboard_interrupt(monkeypatch, tm
             assert sockets == [fake_socket]
 
     monkeypatch.setattr(
-        "ask_human_now.telegram_broker.load_or_create_broker_identity",
+        "ask_human.telegram_broker.load_or_create_broker_identity",
         lambda state_dir, broker_label=None: load_or_create_broker_identity(
             state_dir, broker_label=broker_label
         ),
     )
     monkeypatch.setattr(
-        "ask_human_now.telegram_broker._create_bound_socket",
+        "ask_human.telegram_broker._create_bound_socket",
         lambda host, port: fake_socket,
     )
     monkeypatch.setattr(
-        "ask_human_now.telegram_broker.persist_broker_listen_url",
+        "ask_human.telegram_broker.persist_broker_listen_url",
         lambda state_dir, listen_url: None,
     )
     monkeypatch.setattr(
-        "ask_human_now.telegram_broker.create_telegram_broker_app",
+        "ask_human.telegram_broker.create_telegram_broker_app",
         lambda identity, *, listen_url, telegram_client, target_key: object(),
     )
     monkeypatch.setattr(
-        "ask_human_now.telegram_broker.uvicorn.Config",
+        "ask_human.telegram_broker.uvicorn.Config",
         lambda app, host, port, log_level: {
             "app": app,
             "host": host,
@@ -238,7 +238,7 @@ def test_run_telegram_broker_exits_cleanly_on_keyboard_interrupt(monkeypatch, tm
         },
     )
     monkeypatch.setattr(
-        "ask_human_now.telegram_broker.uvicorn.Server",
+        "ask_human.telegram_broker.uvicorn.Server",
         FakeServer,
     )
     monkeypatch.setattr(

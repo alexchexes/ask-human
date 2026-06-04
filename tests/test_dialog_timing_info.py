@@ -5,7 +5,7 @@ import datetime as dt
 import sys
 from typing import cast
 
-from ask_human_now import prompt_formatting, server
+from ask_human import prompt_formatting, server
 
 
 class StubDialogHandler:

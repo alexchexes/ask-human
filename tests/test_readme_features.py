@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 def test_platform_detection():
     """Test that platform detection works as mentioned in README."""
-    from ask_human_now.server import GUIDialogHandler
+    from ask_human.server import GUIDialogHandler
 
     handler = GUIDialogHandler()
     assert handler.platform in ["Darwin", "Linux", "Windows"]
@@ -22,7 +22,7 @@ def test_platform_detection():
 
 def test_error_handling_classes():
     """Test custom exception classes mentioned in README."""
-    from ask_human_now.server import (
+    from ask_human.server import (
         UserPromptCancelled,
         UserPromptError,
         UserPromptTimeout,
@@ -41,7 +41,7 @@ def test_tool_parameter_validation():
     """Test tool parameter validation as described in README."""
     import asyncio
 
-    from ask_human_now.server import ask_human
+    from ask_human.server import ask_human
 
     # This is an async function, so we need to test it properly
     assert asyncio.iscoroutinefunction(ask_human)

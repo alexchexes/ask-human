@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 def test_main_module_execution():
     """Test that the package can be run as a module."""
     result = subprocess.run(
-        [sys.executable, "-m", "ask_human_now", "--help"],
+        [sys.executable, "-m", "ask_human", "--help"],
         capture_output=True,
         text=True,
         cwd=os.path.join(os.path.dirname(__file__), ".."),

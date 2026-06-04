@@ -5,11 +5,11 @@
   },
   "ask-human-uvx": {
     "command": "uvx",
-    "args": ["--from", "ask-human-now", "ask-human", "--transport", "stdio"]
+    "args": ["ask-human", "--transport", "stdio"]
   },
   "ask-human-local-dev": {
     "command": "python",
-    "args": ["-m", "ask_human_now", "--transport", "stdio"],
+    "args": ["-m", "ask_human", "--transport", "stdio"],
     "cwd": ".",
     "env": {
       "PYTHONPATH": "./src"

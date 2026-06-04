@@ -1,4 +1,4 @@
-"""Entry point for running Ask Human Now as a module."""
+"""Entry point for running Ask Human as a module."""
 
 from .server import main
 

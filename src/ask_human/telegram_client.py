@@ -27,7 +27,7 @@ from .telegram_models import (
 class TelegramPromptClient:
     """Minimal long-polling Telegram client for prompt/response workflows."""
 
-    ISSUE_URL = "https://github.com/alexchexes/ask-human-now/issues"
+    ISSUE_URL = "https://github.com/alexchexes/ask-human/issues"
     NON_REPLY_HINT_TEXT = "⚠️ Message is ignored. Please use Reply on the bot's message."
     UNMATCHED_REPLY_HINT_TEXT = (
         "⚠️ Message is ignored. It was not sent as a Reply to the currently active question. "

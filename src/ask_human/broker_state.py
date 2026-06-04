@@ -13,7 +13,7 @@ from typing import Iterator, Optional
 
 from .telegram_models import TelegramConfig, resolve_telegram_target_key
 
-DEFAULT_BROKER_STATE_DIR_NAME = "ask-human-now"
+DEFAULT_BROKER_STATE_DIR_NAME = "ask-human"
 BROKER_STATE_DB_FILENAME = "telegram-broker.sqlite3"
 BROKER_STARTUP_LOCK_FILENAME = "broker-startup.lock"
 BROKER_TARGETS_DIRNAME = "targets"

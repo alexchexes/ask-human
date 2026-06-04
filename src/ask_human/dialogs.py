@@ -1,4 +1,4 @@
-"""Cross-platform GUI dialog handling for ask-human prompts."""
+"""Cross-platform GUI dialog handling for Ask Human prompts."""
 
 import asyncio
 import platform

@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ask-human-now"
-version = "0.2.0"
+name = "ask-human"
+version = "0.3.0"
 description = "Ask a human for input from MCP clients using local dialogs or Telegram."
 authors = [{name = "Alex Che", email = "alex.chexes@gmail.com"}]
 license = {text = "MIT"}
@@ -43,15 +43,15 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/alexchexes/ask-human-now"
-Repository = "https://github.com/alexchexes/ask-human-now"
-Issues = "https://github.com/alexchexes/ask-human-now/issues"
+Homepage = "https://github.com/alexchexes/ask-human"
+Repository = "https://github.com/alexchexes/ask-human"
+Issues = "https://github.com/alexchexes/ask-human/issues"
 
 [project.scripts]
-ask-human = "ask_human_now:main"
+ask-human = "ask_human:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/ask_human_now"]
+packages = ["src/ask_human"]
 
 [tool.black]
 line-length = 100

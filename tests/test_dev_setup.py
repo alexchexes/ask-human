@@ -71,3 +71,13 @@ def test_readme_documents_dev_install_extra():
         readme_text = readme_file.read()
 
     assert 'pip install -e ".[dev]"' in readme_text
+
+
+def test_console_script_uses_package_name():
+    """Expose the package-matching CLI and avoid the old executable name."""
+    pyproject_path = os.path.join(ROOT_DIR, "pyproject.toml")
+    with open(pyproject_path, encoding="utf-8") as pyproject_file:
+        pyproject_text = pyproject_file.read()
+
+    assert 'ask-human = "ask_human:main"' in pyproject_text
+    assert not re.search(r"^ask-human-now\s*=", pyproject_text, re.MULTILINE)
