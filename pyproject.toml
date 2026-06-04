@@ -26,6 +26,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "markdown-it-py>=4.0.0",
     "mcp",
     "starlette",
     "uvicorn",

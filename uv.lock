@@ -31,6 +31,7 @@ name = "ask-human"
 version = "0.3.0"
 source = { editable = "." }
 dependencies = [
+    { name = "markdown-it-py" },
     { name = "mcp" },
     { name = "starlette" },
     { name = "uvicorn" },
@@ -63,6 +64,7 @@ requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=22.0.0" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.2" },
     { name = "isort", marker = "extra == 'dev'", specifier = ">=5.0.0" },
+    { name = "markdown-it-py", specifier = ">=4.0.0" },
     { name = "mcp" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1.405" },

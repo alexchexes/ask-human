@@ -277,6 +277,12 @@ to the MCP config args list.
 
 When you receive an agent prompt, you can respond with text, a photo, another media/file attachment (up to 20 MB), location, etc. Voice auto-transcription is not supported yet. A capable agent will be able to inspect supported files/media. Files are saved to a temporary directory; see [Telegram file download directory](#telegram-file-download-directory).
 
+Telegram prompts render common agent Markdown, such as bold, italic, inline
+code, fenced code blocks, links, headings, quotes, and lists, through
+Telegram-supported HTML. The prompt metadata remains in an expandable Telegram
+quote block. If Telegram rejects the formatting, the same prompt is retried as
+plain text so the message is still delivered.
+
 <details>
 <summary>How to create a Telegram bot and obtain chat ID</summary>
 

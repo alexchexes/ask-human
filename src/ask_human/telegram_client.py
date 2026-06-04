@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Optional, cast
 
 from .broker_state import TelegramBrokerIdentity
-from .prompt_formatting import TELEGRAM_DOWNLOAD_LIMIT_LABEL
+from .prompt_formatting import TELEGRAM_DOWNLOAD_LIMIT_LABEL, telegram_html_to_plain_text
 from .telegram_models import (
     DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS,
     TELEGRAM_DOWNLOAD_LIMIT_BYTES,
@@ -28,6 +28,7 @@ class TelegramPromptClient:
     """Minimal long-polling Telegram client for prompt/response workflows."""
 
     ISSUE_URL = "https://github.com/alexchexes/ask-human/issues"
+    PROMPT_PARSE_MODE = "HTML"
     NON_REPLY_HINT_TEXT = "⚠️ Message is ignored. Please use Reply on the bot's message."
     UNMATCHED_REPLY_HINT_TEXT = (
         "⚠️ Message is ignored. It was not sent as a Reply to the currently active question. "
@@ -90,22 +91,43 @@ class TelegramPromptClient:
 
     async def _send_prompt(self, prompt_text: str) -> int:
         """Send the outbound Telegram message and return its message id."""
-        result = await self._bot_api_request(
-            "sendMessage",
-            {
-                "chat_id": self.chat_id,
-                "text": prompt_text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-            },
-            timeout=20,
-        )
+        base_payload: dict[str, Any] = {
+            "chat_id": self.chat_id,
+            "text": prompt_text,
+            "disable_web_page_preview": True,
+        }
+        try:
+            result = await self._bot_api_request(
+                "sendMessage",
+                {
+                    **base_payload,
+                    "parse_mode": self.PROMPT_PARSE_MODE,
+                },
+                timeout=20,
+            )
+        except TelegramPromptError as exc:
+            if not self._is_markup_parse_error(exc):
+                raise
+            result = await self._bot_api_request(
+                "sendMessage",
+                {
+                    **base_payload,
+                    "text": telegram_html_to_plain_text(prompt_text),
+                },
+                timeout=20,
+            )
 
         message_id = result.get("message_id")
         if not isinstance(message_id, int):
             raise TelegramPromptError("Telegram sendMessage did not return a message_id.")
 
         return message_id
+
+    @staticmethod
+    def _is_markup_parse_error(error: TelegramPromptError) -> bool:
+        """Identify Telegram failures caused by unsupported prompt markup."""
+        message = str(error).lower()
+        return "parse entities" in message or ("entity" in message and "parse" in message)
 
     def _ensure_poller_locked(self) -> None:
         """Start the update poller while the lock is held."""

@@ -10,6 +10,8 @@ from ask_human.broker_state import TelegramBrokerIdentity
 from ask_human.prompt_formatting import (
     build_dialog_telegram_notice,
     build_telegram_prompt_text,
+    render_markdown_to_telegram_html,
+    telegram_html_to_plain_text,
 )
 from ask_human.telegram_client import TelegramPromptClient
 from ask_human.telegram_models import (
@@ -45,8 +47,8 @@ def test_build_dialog_telegram_notice_is_platform_specific():
 def test_build_telegram_prompt_text_adds_prompt_id_and_reply_instruction():
     """Format Telegram prompts with compact metadata and reply guidance."""
     prompt_text = build_telegram_prompt_text(
-        "Prompt text",
-        "Context text.",
+        "Prompt text with **markdown**.",
+        "Context text with `code` and <literal angle brackets>.",
         prompt_id="QTEST-1234",
         timeout_seconds=300,
         include_timing_info=True,
@@ -55,11 +57,116 @@ def test_build_telegram_prompt_text_adds_prompt_id_and_reply_instruction():
     )
 
     assert "<b>📋 Context:</b>" in prompt_text
+    assert "Context text with <code>code</code> and &lt;literal angle brackets&gt;." in prompt_text
     assert "<b>❓ Question:</b>" in prompt_text
+    assert "Prompt text with <b>markdown</b>." in prompt_text
     assert "<blockquote expandable>" in prompt_text
     assert "Prompt ID: QTEST-1234" in prompt_text
     assert "Broker: Alex Laptop [abcd1234]" in prompt_text
     assert '↩️ Use "Reply" on this message to answer.' in prompt_text
+
+
+def test_render_markdown_to_telegram_html_for_common_agent_markdown():
+    """Render common Markdown to Telegram-supported HTML."""
+    text = (
+        "# Heading\n"
+        "**Bold text**\n"
+        "* asterisk bullet\n"
+        "- dash bullet\n"
+        "`**code stays literal**`\n\n"
+        "> Quote stays visible and **bold**\n\n"
+        "[OpenAI](https://openai.com/?a=1&b=2)\n\n"
+        "```python\n"
+        'print("<literal>")\n'
+        "```"
+    )
+
+    assert render_markdown_to_telegram_html(text) == (
+        "<b>Heading</b>\n"
+        "<b>Bold text</b>\n"
+        "- asterisk bullet\n"
+        "- dash bullet\n"
+        "<code>**code stays literal**</code>\n"
+        "<blockquote>Quote stays visible and <b>bold</b>\n"
+        "</blockquote>\n"
+        '<a href="https://openai.com/?a=1&amp;b=2">OpenAI</a>\n'
+        '<pre><code class="language-python">print("&lt;literal&gt;")\n'
+        "</code></pre>"
+    )
+
+
+def test_telegram_html_to_plain_text_removes_markup_but_preserves_text():
+    """Produce a readable fallback when Telegram rejects HTML parsing."""
+    assert (
+        telegram_html_to_plain_text(
+            "<b>Heading</b>\n"
+            "Text with <code>code</code> and &lt;literal&gt;.\n"
+            "<blockquote expandable>Prompt ID: QTEST-1234</blockquote>"
+        )
+        == "Heading\nText with code and <literal>.\nPrompt ID: QTEST-1234"
+    )
+
+
+def test_telegram_client_sends_prompt_with_html_parse_mode(monkeypatch, tmp_path):
+    """Ask Telegram to render the agent prompt as HTML."""
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    sent_messages = []
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            sent_messages.append(payload)
+            return {"message_id": 101}
+        raise AssertionError(f"Unexpected method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    message_id = asyncio.run(client._send_prompt("Prompt with <b>markdown</b>\n- item"))
+
+    assert message_id == 101
+    assert sent_messages == [
+        {
+            "chat_id": "-1009876543210",
+            "text": "Prompt with <b>markdown</b>\n- item",
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+    ]
+
+
+def test_telegram_client_falls_back_to_plain_text_when_html_is_rejected(monkeypatch, tmp_path):
+    """Do not lose the prompt when Telegram rejects HTML parsing."""
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    sent_messages = []
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            sent_messages.append(payload)
+            if payload.get("parse_mode") == "HTML":
+                raise TelegramPromptError(
+                    "Telegram sendMessage failed: Bad Request: can't parse entities"
+                )
+            return {"message_id": 101}
+        raise AssertionError(f"Unexpected method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    message_id = asyncio.run(client._send_prompt("Prompt with <b>markdown</b> &amp; tags"))
+
+    assert message_id == 101
+    assert len(sent_messages) == 2
+    assert sent_messages[0]["parse_mode"] == "HTML"
+    assert sent_messages[0]["text"] == "Prompt with <b>markdown</b> &amp; tags"
+    assert sent_messages[1] == {
+        "chat_id": "-1009876543210",
+        "text": "Prompt with markdown & tags",
+        "disable_web_page_preview": True,
+    }
 
 
 def test_telegram_client_resolves_reply_to_sent_message(monkeypatch, tmp_path):
