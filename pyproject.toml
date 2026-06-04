@@ -4,15 +4,23 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ask-human-now"
-version = "0.2.0"
-description = "Ask a human for input from MCP clients using local dialogs or Telegram."
+version = "0.2.1"
+description = "Deprecated package name. Use ask-human instead."
 authors = [{name = "Alex Che", email = "alex.chexes@gmail.com"}]
 license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">=3.10"
-keywords = ["mcp", "human-in-the-loop", "gui", "dialog", "telegram", "ai-assistant"]
+keywords = [
+    "mcp",
+    "human-in-the-loop",
+    "gui",
+    "dialog",
+    "telegram",
+    "ai-assistant",
+    "deprecated",
+]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 7 - Inactive",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -43,9 +51,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/alexchexes/ask-human-now"
-Repository = "https://github.com/alexchexes/ask-human-now"
-Issues = "https://github.com/alexchexes/ask-human-now/issues"
+Homepage = "https://github.com/alexchexes/ask-human"
+Repository = "https://github.com/alexchexes/ask-human"
+Issues = "https://github.com/alexchexes/ask-human/issues"
+Replacement = "https://pypi.org/project/ask-human/"
 
 [project.scripts]
 ask-human = "ask_human_now:main"

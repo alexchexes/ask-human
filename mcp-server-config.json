@@ -5,7 +5,7 @@
   },
   "ask-human-uvx": {
     "command": "uvx",
-    "args": ["--from", "ask-human-now", "ask-human", "--transport", "stdio"]
+    "args": ["ask-human", "--transport", "stdio"]
   },
   "ask-human-local-dev": {
     "command": "python",
