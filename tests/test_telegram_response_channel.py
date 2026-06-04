@@ -885,3 +885,95 @@ def test_both_mode_cancels_linux_dialog_when_telegram_wins(monkeypatch):
     assert stub_dialog.cancel_event.is_set() is True
     assert "📨 Also sent to Telegram." in stub_dialog.question
     assert "will stay open" not in stub_dialog.question
+
+
+def test_both_mode_surfaces_telegram_failure_while_dialog_waits(monkeypatch):
+    """Do not hide Telegram delivery failures behind a still-open local dialog."""
+
+    class StubTelegramClient:
+        async def ask_question(
+            self,
+            question,
+            context,
+            *,
+            prompt_id,
+            timeout_seconds,
+            include_timing_info,
+            issued_at,
+        ):
+            raise TelegramPromptError("send failed before delivery")
+
+    class StubDialogHandler:
+        platform = "Linux"
+
+        def __init__(self):
+            self.cancel_event = None
+
+        async def get_user_input(
+            self,
+            question,
+            timeout,
+            *,
+            cancel_event=None,
+            run_in_thread=False,
+        ):
+            self.cancel_event = cancel_event
+            assert cancel_event is not None
+            await cancel_event.wait()
+            return None
+
+    stub_dialog = StubDialogHandler()
+
+    monkeypatch.setattr(server, "telegram_client", StubTelegramClient())
+    monkeypatch.setattr(server, "dialog_handler", stub_dialog)
+    monkeypatch.setattr(server, "response_channel", "both")
+    monkeypatch.setattr(server, "show_timing_info", False)
+    monkeypatch.setattr(server, "dialog_timeout_seconds", 300)
+
+    result = asyncio.run(server.ask_human("Q?", "Context text."))
+
+    assert result == ("❌ User Prompt Error: Telegram prompt failed: send failed before delivery")
+    assert stub_dialog.cancel_event is not None
+    assert stub_dialog.cancel_event.is_set() is True
+
+
+def test_both_mode_prefers_completed_dialog_answer_over_simultaneous_telegram_error(
+    monkeypatch,
+):
+    """Keep first-reply-wins when a local answer is already completed."""
+
+    class StubTelegramClient:
+        async def ask_question(
+            self,
+            question,
+            context,
+            *,
+            prompt_id,
+            timeout_seconds,
+            include_timing_info,
+            issued_at,
+        ):
+            raise TelegramPromptError("send failed")
+
+    class StubDialogHandler:
+        platform = "Linux"
+
+        async def get_user_input(
+            self,
+            question,
+            timeout,
+            *,
+            cancel_event=None,
+            run_in_thread=False,
+        ):
+            return "local answer"
+
+    monkeypatch.setattr(server, "telegram_client", StubTelegramClient())
+    monkeypatch.setattr(server, "dialog_handler", StubDialogHandler())
+    monkeypatch.setattr(server, "response_channel", "both")
+    monkeypatch.setattr(server, "show_timing_info", False)
+    monkeypatch.setattr(server, "dialog_timeout_seconds", 300)
+
+    result = asyncio.run(server.ask_human("Q?", "Context text."))
+
+    assert result == "✅ User response: local answer"

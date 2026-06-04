@@ -61,6 +61,32 @@ def _consume_detached_task_result(task: asyncio.Task[Any]) -> None:
         task.result()
 
 
+async def _finish_dialog_after_telegram_done(
+    dialog_task: asyncio.Task[Optional[str]],
+    cancel_event: Optional[asyncio.Event],
+) -> None:
+    """Close or detach a local dialog after the Telegram side has decided the result."""
+    if dialog_task.done():
+        return
+
+    if cancel_event is not None:
+        cancel_event.set()
+        with suppress(asyncio.TimeoutError, UserPromptError):
+            await asyncio.wait_for(dialog_task, timeout=3)
+    else:
+        dialog_task.add_done_callback(_consume_detached_task_result)
+
+
+async def _cancel_telegram_task(telegram_task: asyncio.Task[Optional[str]]) -> None:
+    """Cancel the Telegram response wait after a local dialog answer wins."""
+    if telegram_task.done():
+        return
+
+    telegram_task.cancel()
+    with suppress(asyncio.CancelledError, TelegramPromptError):
+        await telegram_task
+
+
 async def _get_first_channel_response(
     question: str,
     context: str,
@@ -105,14 +131,19 @@ async def _get_first_channel_response(
 
     while pending_tasks:
         done, _ = await asyncio.wait(pending_tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
+        completed_results: list[tuple[str, str]] = []
+        telegram_error: Optional[UserPromptError] = None
 
         for task in done:
             channel_name = pending_tasks.pop(task)
             try:
                 result = await task
             except TelegramPromptError as exc:
-                if first_error is None:
-                    first_error = UserPromptError(f"Telegram prompt failed: {exc}")
+                error = UserPromptError(f"Telegram prompt failed: {exc}")
+                if channel_name == "telegram":
+                    telegram_error = error
+                elif first_error is None:
+                    first_error = error
                 continue
             except UserPromptError as exc:
                 if first_error is None:
@@ -124,19 +155,20 @@ async def _get_first_channel_response(
             if result is None:
                 continue
 
+            completed_results.append((channel_name, result))
+
+        if completed_results:
+            channel_name, result = completed_results[0]
             if channel_name == "telegram":
-                if cancel_event is not None:
-                    cancel_event.set()
-                    with suppress(asyncio.TimeoutError, UserPromptError):
-                        await asyncio.wait_for(dialog_task, timeout=3)
-                else:
-                    dialog_task.add_done_callback(_consume_detached_task_result)
+                await _finish_dialog_after_telegram_done(dialog_task, cancel_event)
             else:
-                telegram_task.cancel()
-                with suppress(asyncio.CancelledError, TelegramPromptError):
-                    await telegram_task
+                await _cancel_telegram_task(telegram_task)
 
             return result
+
+        if telegram_error is not None:
+            await _finish_dialog_after_telegram_done(dialog_task, cancel_event)
+            raise telegram_error
 
     if first_error is not None:
         raise first_error
