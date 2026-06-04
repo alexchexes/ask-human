@@ -589,6 +589,6 @@ python -m twine check dist/*
 
 ## License
 
-MIT License. See [LICENSE](LICENSE).
+MIT License. See [LICENSE](https://github.com/alexchexes/ask-human/blob/main/LICENSE).
 
 Based on [galprz/ask-human-for-context](https://github.com/galprz/ask-human-for-context).
