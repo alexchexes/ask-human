@@ -29,6 +29,8 @@ class TelegramPromptClient:
 
     ISSUE_URL = "https://github.com/alexchexes/ask-human/issues"
     PROMPT_PARSE_MODE = "HTML"
+    TEXT_REPLY_SPLIT_DEBOUNCE_SECONDS = 0.7
+    TEXT_REPLY_SPLIT_MIN_LENGTH = 3500
     NON_REPLY_HINT_TEXT = "⚠️ Message is ignored. Please use Reply on the bot's message."
     UNMATCHED_REPLY_HINT_TEXT = (
         "⚠️ Message is ignored. It was not sent as a Reply to the currently active question. "
@@ -84,10 +86,16 @@ class TelegramPromptClient:
         except asyncio.TimeoutError:
             return None
         finally:
+            finalize_task: Optional[asyncio.Task[None]] = None
             async with self._lock:
-                self._pending_by_message_id.pop(message_id, None)
+                pending_prompt = self._pending_by_message_id.pop(message_id, None)
+                if pending_prompt is not None:
+                    finalize_task = pending_prompt.text_reply_finalize_task
+                    pending_prompt.text_reply_finalize_task = None
                 if not self._pending_by_message_id:
                     self._latest_prompt_message_id = None
+            if finalize_task is not None:
+                finalize_task.cancel()
 
     async def _send_prompt(self, prompt_text: str) -> int:
         """Send the outbound Telegram message and return its message id."""
@@ -182,13 +190,17 @@ class TelegramPromptClient:
                     return
         except Exception as exc:
             async with self._lock:
-                pending = [item.future for item in self._pending_by_message_id.values()]
+                pending_items = list(self._pending_by_message_id.values())
                 self._pending_by_message_id.clear()
                 self._poller_task = None
 
-            for future in pending:
-                if not future.done():
-                    future.set_exception(TelegramPromptError(f"Telegram polling failed: {exc}"))
+            for pending_prompt in pending_items:
+                if pending_prompt.text_reply_finalize_task is not None:
+                    pending_prompt.text_reply_finalize_task.cancel()
+                if not pending_prompt.future.done():
+                    pending_prompt.future.set_exception(
+                        TelegramPromptError(f"Telegram polling failed: {exc}")
+                    )
 
     async def _handle_update(self, update: dict[str, Any]) -> None:
         """Process one Telegram update and resolve or reject matching replies."""
@@ -206,6 +218,16 @@ class TelegramPromptClient:
         user_message_id = message.get("message_id")
         reply_to_user_message_id = user_message_id if isinstance(user_message_id, int) else None
 
+        response_text = message.get("text")
+        if isinstance(response_text, str) and response_text.strip():
+            await self._handle_text_reply(
+                prompt_message_id,
+                pending_prompt,
+                response_text,
+                reply_to_message_id=reply_to_user_message_id,
+            )
+            return
+
         if isinstance(resolution, TelegramReplyRejection):
             await self._send_status_message(
                 resolution.user_message,
@@ -213,7 +235,111 @@ class TelegramPromptClient:
             )
             return
 
+        await self._resolve_pending_prompt(
+            prompt_message_id,
+            pending_prompt,
+            resolution.agent_response,
+            reply_to_message_id=reply_to_user_message_id,
+        )
+
+    async def _handle_text_reply(
+        self,
+        prompt_message_id: int,
+        pending_prompt: TelegramPendingPrompt,
+        response_text: str,
+        *,
+        reply_to_message_id: Optional[int],
+    ) -> None:
+        """Resolve a text reply, collecting likely Telegram-split follow-up parts."""
+        should_wait_for_split_part = len(response_text) >= self.TEXT_REPLY_SPLIT_MIN_LENGTH
+        should_resolve_now = False
+        async with self._lock:
+            current_pending = self._pending_by_message_id.get(prompt_message_id)
+            if (
+                current_pending is None
+                or current_pending is not pending_prompt
+                or current_pending.future.done()
+            ):
+                return
+
+            current_pending.text_reply_parts.append(response_text)
+            current_pending.text_reply_ack_message_id = reply_to_message_id
+            if should_wait_for_split_part:
+                self._schedule_text_reply_finalize_locked(prompt_message_id, current_pending)
+                return
+
+            should_resolve_now = True
+
+        if should_resolve_now:
+            await self._resolve_pending_text_reply(prompt_message_id, pending_prompt)
+
+    def _schedule_text_reply_finalize_locked(
+        self,
+        prompt_message_id: int,
+        pending_prompt: TelegramPendingPrompt,
+    ) -> None:
+        """Restart the short grace period for a likely split text reply."""
+        if pending_prompt.text_reply_finalize_task is not None:
+            pending_prompt.text_reply_finalize_task.cancel()
+
+        finalize_task = asyncio.create_task(
+            self._finalize_text_reply_after_debounce(prompt_message_id, pending_prompt)
+        )
+        finalize_task.add_done_callback(self._consume_task_result)
+        pending_prompt.text_reply_finalize_task = finalize_task
+
+    async def _finalize_text_reply_after_debounce(
+        self,
+        prompt_message_id: int,
+        pending_prompt: TelegramPendingPrompt,
+    ) -> None:
+        """Resolve a likely split text reply after waiting for follow-up parts."""
+        await asyncio.sleep(self.TEXT_REPLY_SPLIT_DEBOUNCE_SECONDS)
+        await self._resolve_pending_text_reply(prompt_message_id, pending_prompt)
+
+    async def _resolve_pending_text_reply(
+        self,
+        prompt_message_id: int,
+        pending_prompt: TelegramPendingPrompt,
+    ) -> None:
+        """Resolve all collected text parts for one pending prompt."""
+        agent_response = self._combine_text_reply_parts(pending_prompt.text_reply_parts).strip()
+        if not agent_response:
+            return
+
+        await self._resolve_pending_prompt(
+            prompt_message_id,
+            pending_prompt,
+            agent_response,
+            reply_to_message_id=pending_prompt.text_reply_ack_message_id,
+        )
+
+    @staticmethod
+    def _combine_text_reply_parts(parts: list[str]) -> str:
+        """Combine Telegram-split text replies while avoiding glued boundaries."""
+        if not parts:
+            return ""
+
+        combined_parts = [parts[0]]
+        for part in parts[1:]:
+            previous = combined_parts[-1]
+            if previous and part and not previous[-1].isspace() and not part[0].isspace():
+                combined_parts.append("\n")
+            combined_parts.append(part)
+
+        return "".join(combined_parts)
+
+    async def _resolve_pending_prompt(
+        self,
+        prompt_message_id: int,
+        pending_prompt: TelegramPendingPrompt,
+        agent_response: str,
+        *,
+        reply_to_message_id: Optional[int],
+    ) -> None:
+        """Resolve one pending prompt and acknowledge the consumed Telegram reply."""
         should_ack = False
+        finalize_task: Optional[asyncio.Task[None]] = None
         async with self._lock:
             current_pending = self._pending_by_message_id.get(prompt_message_id)
             if (
@@ -221,16 +347,21 @@ class TelegramPromptClient:
                 and current_pending is pending_prompt
                 and not current_pending.future.done()
             ):
-                current_pending.future.set_result(resolution.agent_response)
+                current_pending.future.set_result(agent_response)
                 self._pending_by_message_id.pop(prompt_message_id, None)
+                finalize_task = current_pending.text_reply_finalize_task
+                current_pending.text_reply_finalize_task = None
                 if not self._pending_by_message_id:
                     self._latest_prompt_message_id = None
                 should_ack = True
 
+        if finalize_task is not None and finalize_task is not asyncio.current_task():
+            finalize_task.cancel()
+
         if should_ack:
             await self._safe_send_status_message(
                 f"✅ Received [{pending_prompt.prompt_id}]",
-                reply_to_message_id=reply_to_user_message_id,
+                reply_to_message_id=reply_to_message_id,
             )
 
     async def _match_pending_prompt(

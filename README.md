@@ -369,6 +369,8 @@ In `both` mode:
 Telegram reply behavior:
 
 - use Telegram's Reply feature on the bot's question message
+- long text replies that Telegram splits into multiple reply messages are
+  recombined when the split parts still reply to the same bot message
 - if a local broker is actively waiting and you send a non-reply message, it sends
   a short warning that the message is ignored and you must use Reply
 - if you reply to a message that is not the currently active question, it sends

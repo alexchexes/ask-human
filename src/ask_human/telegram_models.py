@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -69,6 +69,9 @@ class TelegramPendingPrompt:
     future: asyncio.Future[str]
     prompt_id: str
     download_dir: Path
+    text_reply_parts: list[str] = field(default_factory=list)
+    text_reply_ack_message_id: Optional[int] = None
+    text_reply_finalize_task: Optional[asyncio.Task[None]] = None
 
 
 @dataclass(frozen=True)

@@ -209,6 +209,168 @@ def test_telegram_client_resolves_reply_to_sent_message(monkeypatch, tmp_path):
     assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
 
 
+def test_telegram_client_combines_split_text_replies_in_one_update_page(
+    monkeypatch,
+    tmp_path,
+):
+    """Combine likely Telegram-split text reply parts from one update page."""
+    monkeypatch.setattr(TelegramPromptClient, "TEXT_REPLY_SPLIT_MIN_LENGTH", 10)
+    monkeypatch.setattr(TelegramPromptClient, "TEXT_REPLY_SPLIT_DEBOUNCE_SECONDS", 0.01)
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 201,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": "first-long",
+                },
+            },
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 202,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": " final",
+                },
+            },
+        ],
+        [],
+    ]
+    sent_messages = []
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            sent_messages.append(payload)
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 301}
+        if method == "getUpdates":
+            return updates.pop(0)
+        raise AssertionError(f"Unexpected method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    assert result == "first-long final"
+    assert not any(
+        payload["text"].startswith("⚠️ Message is ignored.") for payload in sent_messages
+    )
+    assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
+    assert sent_messages[-1]["reply_to_message_id"] == 202
+
+
+def test_telegram_client_separates_split_text_replies_without_boundary_whitespace(
+    monkeypatch,
+    tmp_path,
+):
+    """Avoid silently gluing words when Telegram drops split-boundary whitespace."""
+    monkeypatch.setattr(TelegramPromptClient, "TEXT_REPLY_SPLIT_MIN_LENGTH", 10)
+    monkeypatch.setattr(TelegramPromptClient, "TEXT_REPLY_SPLIT_DEBOUNCE_SECONDS", 0.01)
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 201,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": "first sentence.",
+                },
+            },
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 202,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": "Second",
+                },
+            },
+        ],
+        [],
+    ]
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 301}
+        if method == "getUpdates":
+            return updates.pop(0)
+        raise AssertionError(f"Unexpected method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    assert result == "first sentence.\nSecond"
+
+
+def test_telegram_client_combines_split_text_replies_across_update_pages(
+    monkeypatch,
+    tmp_path,
+):
+    """Keep a likely split text reply pending long enough for the next poll."""
+    monkeypatch.setattr(TelegramPromptClient, "TEXT_REPLY_SPLIT_MIN_LENGTH", 10)
+    monkeypatch.setattr(TelegramPromptClient, "TEXT_REPLY_SPLIT_DEBOUNCE_SECONDS", 0.5)
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 201,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": "first-long",
+                },
+            }
+        ],
+        [
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 202,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": " final",
+                },
+            }
+        ],
+        [],
+    ]
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 301}
+        if method == "getUpdates":
+            return updates.pop(0)
+        raise AssertionError(f"Unexpected method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    assert result == "first-long final"
+
+
 def test_telegram_client_confirms_consumed_updates_before_stopping(monkeypatch, tmp_path):
     """Perform one final offset-advancing poll so consumed replies do not replay after restart."""
     client = TelegramPromptClient(
