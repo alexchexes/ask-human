@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ask-human"
-version = "0.3.1"
-description = "Ask a human for input from MCP clients using local dialogs or Telegram."
+version = "0.3.2"
+description = "MCP server that lets AI agents ask the user for input via Telegram or a GUI dialog and wait for the answer."
 authors = [{name = "Alex Che", email = "alex.chexes@gmail.com"}]
 license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">=3.10"
-keywords = ["mcp", "human-in-the-loop", "gui", "dialog", "telegram", "ai-assistant"]
+keywords = ["mcp", "human-in-the-loop", "telegram", "ai-assistant", "agents", "ai-agents", "agentic-ai", "codex", "claude", "claude-code", "cursor", "gui", "dialog"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -27,8 +27,9 @@ classifiers = [
 
 dependencies = [
     "markdown-it-py>=4.0.0",
-    "mcp",
-    "starlette",
+    "mcp>=1.23.0",
+    "python-multipart>=0.0.27",
+    "starlette>=1.0.1",
     "uvicorn",
 ]
 
