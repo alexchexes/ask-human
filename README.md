@@ -131,26 +131,21 @@ Or if you installed using `pip` / `pipx`:
 codex mcp add ask-human -- ask-human --transport stdio
 ```
 
-After using either CLI command above, Codex v0.142.0-alpha.1+ also needs this `config.toml` entry to keep Ask Human outside code-mode `exec` cells so its intentionally long-running calls remain runtime-managed:
-
-```toml
-[features.code_mode]
-# Codex v0.142.0-alpha.1+
-direct_only_tool_namespaces = ["mcp__ask_human"]
-```
+For Codex v0.142.0-alpha.1+, you must also add a `[features.code_mode]` entry in the config.toml file (see below) to keep `Ask Human` outside of their new "code-mode" `exec` wrapper (which allows the model to terminate the call before you actually answer anything; see https://github.com/openai/codex/issues/29122).
 
 #### Or manually add `config.toml` entry:
 
 Open your `~/.codex/config.toml` and add a new entry:
 
 ```toml
-[features.code_mode]
-# Codex v0.142.0-alpha.1+
-direct_only_tool_namespaces = ["mcp__ask_human"]
-
 [mcp_servers.ask-human]
 command = "uvx"
 args = ["ask-human", "--transport", "stdio"]
+
+# Codex v0.142.0-alpha.1+
+[features.code_mode]
+direct_only_tool_namespaces = ["mcp__ask_human"]
+
 ```
 
 Configuration is done by adding other `args`; see [Configuration](#configuration) for available options.
@@ -230,15 +225,9 @@ and do not roll back changes unless it is absolutely necessary (e.g. a broken
 live/production system, runaway resource consumption, etc.). Instead, stop, report
 the current state, repeat the context and question, and let the user answer normally.
 
-If Codex runs `ask_human` inside a code-mode `exec` cell, an `exec` or `wait`
-result saying `Script running with cell ID ...` is only an intermediate yield. It
-is not an `ask_human` timeout or an empty response. Continue calling `wait`, using
-long yield intervals when appropriate, until the cell completes. Never use
-`terminate: true` merely because the human has not responded, regardless of how
-long the wait lasts. Terminate only if the user explicitly cancels or a genuine
-external failure requires cleanup. Treat the tool as timed out only when
-`ask_human` itself returns an explicit timeout or the MCP/tool call completes with
-a timeout error.
+If you run `ask_human` through a wrapper that yields intermediate results while waiting,
+never terminate the call until the tool returns a user response or an error, the user
+explicitly cancels it, or its configured timeout expires.
 
 Do not optimize for completing the task in one uninterrupted run if clarification
 would lead to a better decision. Making correct design decisions is more important
@@ -418,10 +407,6 @@ Telegram reply behavior:
 Template for your `~/.codex/config.toml`:
 
 ```toml
-[features.code_mode]
-# Codex v0.142.0-alpha.1+
-direct_only_tool_namespaces = ["mcp__ask_human"]
-
 [mcp_servers.ask-human]
 command = "uvx"
 args = [
@@ -435,6 +420,10 @@ args = [
 ]
 # make sure client tool call timeout is same as or greater than tool internal timeout
 tool_timeout_sec = 86400 # 24 h
+
+# Codex v0.142.0-alpha.1+
+[features.code_mode]
+direct_only_tool_namespaces = ["mcp__ask_human"]
 ```
 
 #### Claude Code config stub:
