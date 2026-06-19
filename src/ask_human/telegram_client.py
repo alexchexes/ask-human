@@ -683,7 +683,7 @@ class TelegramPromptClient:
             lines.append("Note: this may be unintended unless explicitly expected.")
         if caption:
             lines.append(f"Caption: {caption}")
-        lines.append(f"Saved file: {saved_path}")
+        lines.append(f"User attached file: {saved_path}")
         if original_file_name:
             lines.append(f"Original file name: {original_file_name}")
 

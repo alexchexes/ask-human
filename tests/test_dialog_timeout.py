@@ -63,6 +63,50 @@ def test_tool_uses_configured_dialog_timeout(monkeypatch):
     assert stub.timeout == 1200
 
 
+def test_tool_warns_for_empty_dialog_response(monkeypatch):
+    """Do not report an accidental empty dialog answer as a successful response."""
+
+    class StubDialogHandler:
+        async def get_user_input(self, question, timeout):
+            return ""
+
+    monkeypatch.setattr(server, "dialog_handler", StubDialogHandler())
+
+    result = asyncio.run(server.ask_human("Question?"))
+
+    assert result.startswith("⚠️ Empty response received.")
+
+
+def test_tool_warns_for_whitespace_only_dialog_response(monkeypatch):
+    """Treat whitespace-only dialog answers the same as empty answers."""
+
+    class StubDialogHandler:
+        async def get_user_input(self, question, timeout):
+            return "   "
+
+    monkeypatch.setattr(server, "dialog_handler", StubDialogHandler())
+
+    result = asyncio.run(server.ask_human("Question?"))
+
+    assert result.startswith("⚠️ Empty response received.")
+
+
+def test_tool_warns_when_dialog_returns_no_response(monkeypatch):
+    """Report a closed, cancelled, or timed-out dialog as no response."""
+
+    class StubDialogHandler:
+        async def get_user_input(self, question, timeout):
+            return None
+
+    monkeypatch.setattr(server, "dialog_handler", StubDialogHandler())
+    monkeypatch.setattr(server, "dialog_timeout_seconds", 120)
+
+    result = asyncio.run(server.ask_human("Question?"))
+
+    assert result.startswith("⚠️ Timeout: No response received within 2 minutes.")
+    assert "timed out or been cancelled" in result
+
+
 def test_windows_string_dialog_schedules_timeout():
     """Schedule timeout inside Tk so Windows askstring is no longer unbounded."""
     handler = GUIDialogHandler()

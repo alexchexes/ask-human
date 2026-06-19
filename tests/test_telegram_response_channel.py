@@ -550,6 +550,61 @@ def test_telegram_client_rejects_too_large_file_and_waits_for_valid_text(monkeyp
     assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
 
 
+def test_telegram_client_formats_file_reply_as_user_attachment(monkeypatch, tmp_path):
+    """Tell the agent that the user attached the downloaded Telegram file."""
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 210,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "caption": "please inspect this",
+                    "document": {
+                        "file_id": "file-ok",
+                        "file_size": 1024,
+                        "file_name": "report.txt",
+                    },
+                },
+            }
+        ],
+        [],
+    ]
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 302}
+        if method == "getUpdates":
+            return updates.pop(0)
+        if method == "getFile":
+            return {"file_path": "documents/report.txt", "file_size": 1024}
+        raise AssertionError(f"Unexpected method: {method}")
+
+    def fake_download_file_sync(telegram_file_path, target_path):
+        assert telegram_file_path == "documents/report.txt"
+        target_path.write_text("downloaded content", encoding="utf-8")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+    monkeypatch.setattr(client, "_download_telegram_file_sync", fake_download_file_sync)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    expected_path = (tmp_path / "QTEST-1234" / "report.txt").resolve()
+    assert result == (
+        "[telegram document reply]\n"
+        "Caption: please inspect this\n"
+        f"User attached file: {expected_path}\n"
+        "Original file name: report.txt"
+    )
+
+
 def test_reply_rejection_status_send_failure_fails_prompt(monkeypatch, tmp_path):
     """Fail the prompt if Telegram will not deliver a retry/error message."""
     client = TelegramPromptClient(
