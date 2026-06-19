@@ -34,8 +34,17 @@ from .telegram_models import (
     resolve_telegram_download_dir,
 )
 
+MCP_SERVER_INSTRUCTIONS = (
+    "ask_human is intentionally long-running and may remain pending for hours while "
+    "the human is unavailable. Do not cancel or abandon a pending call merely because "
+    "no response has arrived; wait until it returns, reaches the configured timeout, "
+    "the user explicitly cancels, or the transport fails. In Codex code mode, "
+    "Script running with cell ID ... is an intermediate yield, not an empty result or "
+    "timeout. Keep waiting; do not use terminate: true solely because the call is pending."
+)
+
 # Initialize FastMCP server for human input tools.
-mcp = FastMCP("ask-human")
+mcp = FastMCP("ask-human", instructions=MCP_SERVER_INSTRUCTIONS)
 
 DEFAULT_RESPONSE_CHANNEL = "dialog"
 
