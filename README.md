@@ -115,6 +115,8 @@ Codex, Claude Code, Cursor, and other MCP-capable agent clients can use Ask Huma
 
 ### Codex
 
+> **Important:** For Codex CLI `0.142.0-alpha.1+` (bundled in VS Code extension `26.616.30709+` and, approximately, Codex app builds from the `26.616.*` release family onward), you must also add the `[features.code_mode]` entry below. It keeps `Ask Human` outside the new code-mode `exec` wrapper, which allows the model to terminate the call before you answer ([openai/codex#29122](https://github.com/openai/codex/issues/29122)). If unsure, check `cli_version` in the first `session_meta` line of your newest `~/.codex/sessions/.../rollout-*.jsonl` file.
+
 > Codex MCP docs: <https://developers.openai.com/codex/mcp>
 
 #### Using Codex CLI `mcp add`:
@@ -131,8 +133,6 @@ Or if you installed using `pip` / `pipx`:
 codex mcp add ask-human -- ask-human --transport stdio
 ```
 
-For Codex v0.142.0-alpha.1+, you must also add a `[features.code_mode]` entry in the config.toml file (see below) to keep `Ask Human` outside of their new "code-mode" `exec` wrapper (which allows the model to terminate the call before you actually answer anything; see https://github.com/openai/codex/issues/29122).
-
 #### Or manually add `config.toml` entry:
 
 Open your `~/.codex/config.toml` and add a new entry:
@@ -142,7 +142,7 @@ Open your `~/.codex/config.toml` and add a new entry:
 command = "uvx"
 args = ["ask-human", "--transport", "stdio"]
 
-# Codex v0.142.0-alpha.1+
+# Codex CLI v0.142.0-alpha.1+ / VS Code extension v26.616.30709+
 [features.code_mode]
 direct_only_tool_namespaces = ["mcp__ask_human"]
 
@@ -421,7 +421,7 @@ args = [
 # make sure client tool call timeout is same as or greater than tool internal timeout
 tool_timeout_sec = 86400 # 24 h
 
-# Codex v0.142.0-alpha.1+
+# Codex CLI v0.142.0-alpha.1+ / VS Code extension v26.616.30709+
 [features.code_mode]
 direct_only_tool_namespaces = ["mcp__ask_human"]
 ```

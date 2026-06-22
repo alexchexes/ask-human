@@ -35,12 +35,10 @@ from .telegram_models import (
 )
 
 MCP_SERVER_INSTRUCTIONS = (
-    "ask_human is intentionally long-running and may remain pending for hours while "
-    "the human is unavailable. Do not cancel or abandon a pending call merely because "
-    "no response has arrived; wait until it returns, reaches the configured timeout, "
-    "the user explicitly cancels, or the transport fails. In Codex code mode, "
-    "Script running with cell ID ... is an intermediate yield, not an empty result or "
-    "timeout. Keep waiting; do not use terminate: true solely because the call is pending."
+    "ask_human may remain pending for hours. Treat intermediate statuses or yields as "
+    "non-terminal; never terminate or abandon the call solely because it is still pending. "
+    "Wait until it returns, reaches its configured timeout, the user cancels, or the "
+    "transport fails."
 )
 
 # Initialize FastMCP server for human input tools.
@@ -227,34 +225,29 @@ async def get_user_input_from_configured_channel(
 
 @mcp.tool()
 async def ask_human(question: str, context: str = "") -> str:
-    """Ask the human for input during an agent workflow.
+    """Talk to the human without ending the current turn.
 
-    This tool enables AI assistants to pause workflows when they encounter a decision,
-    need clarification on implementation choices, or require understanding of preferred
-    approaches. Use this when conducting work and you need user input to proceed effectively.
+    Use this as a collaboration tool: ask a question, clarify intent or preferences,
+    request a decision, coordinate an action, or work through something interactively.
 
-    Common use cases:
-    - Multiple valid implementation approaches exist (ask user for preference)
-    - Need clarification on preferred tech stack or framework
-    - Missing domain-specific requirements or constraints
-    - Uncertain about user's specific goals or priorities
-    - Need to understand existing codebase patterns or conventions
+    When missing information or an unconfirmed assumption could affect the outcome, always use
+    this tool before proceeding. Keep each call focused and include enough context and tradeoffs for
+    an informed answer.
+
+    Use normal multiline Markdown and preserve paragraph and list breaks.
 
     Args:
-        question: The specific question to ask the human (max 1000 characters)
-        context: Background info explaining why this context is needed (max 2000 characters)
+        question: The question or request shown to the human (max 1000 characters)
+        context: Context or additional information shown before the question (max 2000 characters)
 
     Returns:
-        The user's response as a formatted string with status indicator
-
-    Raises:
-        ValueError: If parameters are invalid or out of acceptable ranges
+        The human's response with a status prefix, or an error description.
     """
 
     timeout_seconds = dialog_timeout_seconds
 
     # Parameter validation with clear error messages
-    if not question or not isinstance(question, str):
+    if not question:
         return "❌ Error: 'question' parameter is required and must be a non-empty string"
 
     if len(question.strip()) == 0:
@@ -270,9 +263,6 @@ async def ask_human(question: str, context: str = "") -> str:
 
     if timeout_seconds < 1:
         return "❌ Error: 'timeout_seconds' must be at least 1 second"
-    if not isinstance(context, str):
-        return "❌ Error: 'context' must be a string (use empty string if no context needed)"
-
     if len(context) > 2000:
         return "❌ Error: 'context' is too long (max 2000 characters). Please provide a more concise context."
 

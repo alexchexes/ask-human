@@ -18,7 +18,7 @@ def test_mcp_server_exists():
     assert mcp.name == "ask-human"
     assert mcp._mcp_server.instructions == MCP_SERVER_INSTRUCTIONS
     assert "may remain pending for hours" in MCP_SERVER_INSTRUCTIONS
-    assert "do not use terminate: true" in MCP_SERVER_INSTRUCTIONS
+    assert "intermediate statuses or yields as non-terminal" in MCP_SERVER_INSTRUCTIONS
 
 
 def test_ask_human_tool():
@@ -28,3 +28,8 @@ def test_ask_human_tool():
 
     assert callable(ask_human)
     assert set(server.mcp._tool_manager._tools) == {"ask_human"}
+    tool = server.mcp._tool_manager._tools["ask_human"]
+    description = tool.description
+    assert "Use normal multiline Markdown" in description
+    assert tool.parameters["properties"]["question"]["type"] == "string"
+    assert tool.parameters["properties"]["context"]["type"] == "string"
