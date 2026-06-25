@@ -60,7 +60,7 @@ def test_tool_uses_configured_dialog_timeout(monkeypatch):
 
     result = asyncio.run(server.ask_human("Question?"))
 
-    assert result == "✅ User response: ok"
+    assert result == "✅ User reply:\nok"
     assert stub.timeout == 1200
 
 
@@ -119,7 +119,7 @@ def test_tool_allows_prompt_at_combined_length_limit(monkeypatch):
 
     result = asyncio.run(server.ask_human("Q" * 5000, "C" * 3000))
 
-    assert result == "✅ User response: ok"
+    assert result == "✅ User reply:\nok"
 
 
 def test_tool_rejects_prompt_over_combined_length_limit():

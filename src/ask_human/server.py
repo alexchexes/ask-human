@@ -102,7 +102,7 @@ async def _get_first_channel_response(
     timeout_seconds: int,
     prompt_id: str,
     issued_at: dt.datetime,
-) -> Optional[str]:
+) -> Optional[tuple[str, str]]:
     """Race dialog and Telegram, returning the first successful response."""
     if telegram_client is None:
         raise UserPromptError(
@@ -172,7 +172,7 @@ async def _get_first_channel_response(
             else:
                 await _cancel_telegram_task(telegram_task)
 
-            return result
+            return channel_name, result
 
         if telegram_error is not None:
             await _finish_dialog_after_telegram_done(dialog_task, cancel_event)
@@ -191,10 +191,11 @@ async def get_user_input_from_configured_channel(
     timeout_seconds: int,
     prompt_id: str,
     issued_at: dt.datetime,
-) -> Optional[str]:
+) -> Optional[tuple[str, str]]:
     """Use the currently configured response channel(s) to collect user input."""
     if response_channel == "dialog":
-        return await dialog_handler.get_user_input(dialog_prompt, timeout_seconds)
+        result = await dialog_handler.get_user_input(dialog_prompt, timeout_seconds)
+        return None if result is None else ("dialog", result)
 
     if telegram_client is None:
         raise UserPromptError(
@@ -203,7 +204,7 @@ async def get_user_input_from_configured_channel(
 
     if response_channel == "telegram":
         try:
-            return await telegram_client.ask_question(
+            result = await telegram_client.ask_question(
                 question,
                 context,
                 prompt_id=prompt_id,
@@ -211,6 +212,7 @@ async def get_user_input_from_configured_channel(
                 include_timing_info=show_timing_info,
                 issued_at=issued_at,
             )
+            return None if result is None else ("telegram", result)
         except TelegramPromptError as exc:
             raise UserPromptError(f"Telegram prompt failed: {exc}") from exc
 
@@ -284,7 +286,7 @@ async def ask_human(question: str, context: str = "") -> str:
             issued_at=issued_at,
         )
         # Get user input via the configured channel(s)
-        response = await get_user_input_from_configured_channel(
+        channel_response = await get_user_input_from_configured_channel(
             question,
             context,
             dialog_prompt,
@@ -294,12 +296,13 @@ async def ask_human(question: str, context: str = "") -> str:
         )
 
         # Handle different response scenarios with custom exceptions
-        if response is None:
+        if channel_response is None:
             # Timeout occurred
             timeout_minutes = timeout_seconds // 60
             timeout_display = f"{timeout_minutes} minute{'s' if timeout_minutes != 1 else ''}"
             raise UserPromptTimeout(f"No response received within {timeout_display}")
 
+        response_channel_name, response = channel_response
         if not response.strip():
             # Empty response (user clicked OK without entering text)
             return "⚠️ Empty response received. The user clicked OK but didn't enter any text. Please ask again if a response is needed."
@@ -308,7 +311,9 @@ async def ask_human(question: str, context: str = "") -> str:
         clean_response = response.strip()
 
         # Format response with clear indicator
-        return f"✅ User response: {clean_response}"
+        if response_channel_name == "telegram":
+            return f"✅ Replied via Telegram:\n{clean_response}"
+        return f"✅ User reply:\n{clean_response}"
 
     except UserPromptTimeout as e:
         # Handle timeout with user-friendly message

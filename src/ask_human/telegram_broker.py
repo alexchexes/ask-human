@@ -73,16 +73,17 @@ async def _wait_for_prompt_or_client_disconnect(
             timeout=BROKER_DISCONNECT_POLL_SECONDS,
             return_when=asyncio.FIRST_COMPLETED,
         )
-        if prompt_task in done:
-            return await prompt_task
 
         if shutdown_event is not None and shutdown_event.is_set():
             prompt_task.cancel()
-            with suppress(asyncio.CancelledError):
+            with suppress(asyncio.CancelledError, TelegramPromptError):
                 await prompt_task
             raise BrokerPromptClientDisconnected(
                 "Broker shutdown requested before Telegram reply arrived."
             )
+
+        if prompt_task in done:
+            return await prompt_task
 
         if await request.is_disconnected():
             prompt_task.cancel()

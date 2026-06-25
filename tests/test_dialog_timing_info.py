@@ -46,7 +46,7 @@ def test_tool_keeps_default_prompt_shape_without_timing_info(monkeypatch):
 
     result = asyncio.run(server.ask_human("Question?"))
 
-    assert result == "✅ User response: ok"
+    assert result == "✅ User reply:\nok"
     assert stub.timeout == server.DEFAULT_DIALOG_TIMEOUT_SECONDS
     assert stub.question == "❓ Question:\nQuestion?"
 
@@ -115,7 +115,7 @@ def test_tool_appends_timing_info_when_enabled(monkeypatch):
         )
     )
 
-    assert result == "✅ User response: ok"
+    assert result == "✅ User reply:\nok"
     separator = "─" * 40
     assert stub.question == (
         "📋 Context:\n"
@@ -143,7 +143,7 @@ def test_tool_uses_consistent_question_label_without_context(monkeypatch):
 
     result = asyncio.run(server.ask_human("Question without context?"))
 
-    assert result == "✅ User response: ok"
+    assert result == "✅ User reply:\nok"
     separator = "─" * 40
     assert stub.question == (
         "❓ Question:\n"

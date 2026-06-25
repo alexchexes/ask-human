@@ -19,7 +19,11 @@ from ask_human.telegram_broker import (
     create_telegram_broker_app,
     run_telegram_broker,
 )
-from ask_human.telegram_models import TelegramConfig, resolve_telegram_target_key
+from ask_human.telegram_models import (
+    TelegramConfig,
+    TelegramPromptError,
+    resolve_telegram_target_key,
+)
 
 
 def test_broker_identity_is_stable_for_one_state_dir(tmp_path):
@@ -211,6 +215,45 @@ def test_broker_shutdown_cancels_pending_prompt(monkeypatch, tmp_path):
     assert telegram_client.cancelled is True
     assert telegram_client.shutdown_called is True
     assert shutdown_calls == ["shutdown"]
+
+
+def test_broker_shutdown_status_wins_over_prompt_error(tmp_path):
+    """Return the shutdown status when the prompt task fails during broker shutdown."""
+
+    class FakeRequest:
+        async def json(self):
+            return {
+                "prompt_texts": ["Prompt text"],
+                "prompt_id": "QTEST-1234",
+                "timeout_seconds": 300,
+                "download_dir": str(tmp_path),
+            }
+
+        async def is_disconnected(self):
+            return False
+
+    class FakeTelegramClient:
+        async def ask_question(self, prompt_texts, timeout_seconds, prompt_id, download_dir):
+            raise TelegramPromptError("Telegram broker shutdown requested.")
+
+    shutdown_event = asyncio.Event()
+    shutdown_event.set()
+    app = create_telegram_broker_app(
+        TelegramBrokerIdentity("abcd1234", "office"),
+        listen_url="http://127.0.0.1:7456",
+        telegram_client=cast(Any, FakeTelegramClient()),
+        target_key="feedbeef",
+        shutdown_event=shutdown_event,
+    )
+    prompts_route = cast(
+        Any,
+        next(route for route in app.routes if getattr(route, "path", None) == "/prompts"),
+    )
+
+    response = asyncio.run(prompts_route.endpoint(FakeRequest()))
+
+    assert response.status_code == 499
+    assert b"Broker shutdown requested" in response.body
 
 
 def test_broker_prompt_forwards_multipart_prompt_texts(monkeypatch, tmp_path):

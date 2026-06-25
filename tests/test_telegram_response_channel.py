@@ -293,6 +293,57 @@ def test_telegram_client_resolves_reply_to_sent_message(monkeypatch, tmp_path):
     assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
 
 
+def test_telegram_client_includes_selected_quote_context(monkeypatch, tmp_path):
+    """Include Telegram's manual selected quote in the agent-facing response."""
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 201,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "quote": {
+                        "text": "selected prompt phrase",
+                        "position": 14,
+                        "is_manual": True,
+                    },
+                    "text": "telegram answer",
+                },
+            }
+        ],
+        [],
+    ]
+    sent_messages = []
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            sent_messages.append(payload)
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 301}
+        if method == "getUpdates":
+            return updates.pop(0)
+        raise AssertionError(f"Unexpected method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    assert result == (
+        "User quoted your prompt:\n"
+        "selected prompt phrase\n"
+        "\n"
+        "User reply:\n"
+        "telegram answer"
+    )
+    assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
+
+
 def test_telegram_client_accepts_reply_to_any_prompt_chunk(monkeypatch, tmp_path):
     """Register every multipart prompt message as a valid reply target."""
     client = TelegramPromptClient(
@@ -738,8 +789,60 @@ def test_telegram_client_formats_file_reply_as_user_attachment(monkeypatch, tmp_
     assert result == (
         "[telegram document reply]\n"
         "Caption: please inspect this\n"
+        f"User attached file: {expected_path}"
+    )
+
+
+def test_telegram_client_keeps_original_file_name_when_local_name_changes(monkeypatch, tmp_path):
+    """Only include the original Telegram filename when the saved filename differs."""
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 210,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "document": {
+                        "file_id": "file-ok",
+                        "file_size": 1024,
+                        "file_name": "bad:name.txt",
+                    },
+                },
+            }
+        ],
+        [],
+    ]
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 302}
+        if method == "getUpdates":
+            return updates.pop(0)
+        if method == "getFile":
+            return {"file_path": "documents/fallback.txt", "file_size": 1024}
+        raise AssertionError(f"Unexpected method: {method}")
+
+    def fake_download_file_sync(telegram_file_path, target_path):
+        assert telegram_file_path == "documents/fallback.txt"
+        target_path.write_text("downloaded content", encoding="utf-8")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+    monkeypatch.setattr(client, "_download_telegram_file_sync", fake_download_file_sync)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    expected_path = (tmp_path / "QTEST-1234" / "bad_name.txt").resolve()
+    assert result == (
+        "[telegram document reply]\n"
         f"User attached file: {expected_path}\n"
-        "Original file name: report.txt"
+        "Original file name: bad:name.txt"
     )
 
 
@@ -1118,7 +1221,7 @@ def test_tool_uses_telegram_only_mode_without_dialog(monkeypatch):
 
     result = asyncio.run(server.ask_human("Where should I deploy?", "Need a quick answer."))
 
-    assert result == "✅ User response: telegram answer"
+    assert result == "✅ Replied via Telegram:\ntelegram answer"
     assert stub_telegram.timeout == 300
     assert stub_telegram.question == "Where should I deploy?"
     assert stub_telegram.context == "Need a quick answer."
@@ -1126,6 +1229,52 @@ def test_tool_uses_telegram_only_mode_without_dialog(monkeypatch):
     assert stub_telegram.prompt_id.startswith("Q")
     assert stub_telegram.include_timing_info is False
     assert isinstance(stub_telegram.issued_at, dt.datetime)
+
+
+def test_tool_labels_structured_telegram_reply_by_channel(monkeypatch):
+    """Do not make Telegram quote metadata look like literal user-authored text."""
+
+    class StubTelegramClient:
+        async def ask_question(
+            self,
+            question,
+            context,
+            *,
+            prompt_id,
+            timeout_seconds,
+            include_timing_info,
+            issued_at,
+        ):
+            return (
+                "User quoted your prompt:\n"
+                "quoted prompt text\n"
+                "\n"
+                "User reply:\n"
+                "telegram answer"
+            )
+
+    class StubDialogHandler:
+        platform = "Linux"
+
+        async def get_user_input(self, *args, **kwargs):
+            raise AssertionError("Dialog should not be used in telegram mode")
+
+    monkeypatch.setattr(server, "telegram_client", StubTelegramClient())
+    monkeypatch.setattr(server, "dialog_handler", StubDialogHandler())
+    monkeypatch.setattr(server, "response_channel", "telegram")
+    monkeypatch.setattr(server, "show_timing_info", False)
+    monkeypatch.setattr(server, "dialog_timeout_seconds", 300)
+
+    result = asyncio.run(server.ask_human("Q?", "Context text."))
+
+    assert result == (
+        "✅ Replied via Telegram:\n"
+        "User quoted your prompt:\n"
+        "quoted prompt text\n"
+        "\n"
+        "User reply:\n"
+        "telegram answer"
+    )
 
 
 def test_both_mode_adds_windows_warning_and_threads_dialog(monkeypatch):
@@ -1179,7 +1328,7 @@ def test_both_mode_adds_windows_warning_and_threads_dialog(monkeypatch):
 
     result = asyncio.run(server.ask_human("Q?", "Context text."))
 
-    assert result == "✅ User response: telegram answer"
+    assert result == "✅ Replied via Telegram:\ntelegram answer"
     assert stub_dialog.calls[0]["run_in_thread"] is True
     assert stub_dialog.calls[0]["cancel_event"] is None
     assert stub_dialog.calls[0]["question"] is not None
@@ -1234,7 +1383,7 @@ def test_both_mode_cancels_linux_dialog_when_telegram_wins(monkeypatch):
 
     result = asyncio.run(server.ask_human("Q?", "Context text."))
 
-    assert result == "✅ User response: telegram answer"
+    assert result == "✅ Replied via Telegram:\ntelegram answer"
     assert stub_dialog.cancel_event is not None
     assert stub_dialog.question is not None
     assert stub_dialog.cancel_event.is_set() is True
@@ -1331,4 +1480,4 @@ def test_both_mode_prefers_completed_dialog_answer_over_simultaneous_telegram_er
 
     result = asyncio.run(server.ask_human("Q?", "Context text."))
 
-    assert result == "✅ User response: local answer"
+    assert result == "✅ User reply:\nlocal answer"

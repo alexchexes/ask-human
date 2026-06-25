@@ -262,6 +262,7 @@ class TelegramPromptClient:
             return
 
         prompt_message_id, pending_prompt, message = matched
+        selected_quote_text = self._extract_selected_quote_text(message)
         resolution = await self._build_reply_resolution(
             message,
             pending_prompt.prompt_id,
@@ -276,6 +277,7 @@ class TelegramPromptClient:
                 prompt_message_id,
                 pending_prompt,
                 response_text,
+                selected_quote_text=selected_quote_text,
                 reply_to_message_id=reply_to_user_message_id,
             )
             return
@@ -290,7 +292,10 @@ class TelegramPromptClient:
         await self._resolve_pending_prompt(
             prompt_message_id,
             pending_prompt,
-            resolution.agent_response,
+            self._format_agent_response(
+                resolution.agent_response,
+                selected_quote_text=selected_quote_text,
+            ),
             reply_to_message_id=reply_to_user_message_id,
         )
 
@@ -300,6 +305,7 @@ class TelegramPromptClient:
         pending_prompt: TelegramPendingPrompt,
         response_text: str,
         *,
+        selected_quote_text: Optional[str],
         reply_to_message_id: Optional[int],
     ) -> None:
         """Resolve a text reply, collecting likely Telegram-split follow-up parts."""
@@ -315,6 +321,8 @@ class TelegramPromptClient:
                 return
 
             current_pending.text_reply_parts.append(response_text)
+            if selected_quote_text is not None and current_pending.selected_quote_text is None:
+                current_pending.selected_quote_text = selected_quote_text
             current_pending.text_reply_ack_message_id = reply_to_message_id
             if should_wait_for_split_part:
                 self._schedule_text_reply_finalize_locked(prompt_message_id, current_pending)
@@ -362,7 +370,10 @@ class TelegramPromptClient:
         await self._resolve_pending_prompt(
             prompt_message_id,
             pending_prompt,
-            agent_response,
+            self._format_agent_response(
+                agent_response,
+                selected_quote_text=pending_prompt.selected_quote_text,
+            ),
             reply_to_message_id=pending_prompt.text_reply_ack_message_id,
         )
 
@@ -380,6 +391,26 @@ class TelegramPromptClient:
             combined_parts.append(part)
 
         return "".join(combined_parts)
+
+    @staticmethod
+    def _format_agent_response(
+        agent_response: str,
+        *,
+        selected_quote_text: Optional[str],
+    ) -> str:
+        """Include Telegram's manual selected quote when the user replied with one."""
+        if selected_quote_text is None:
+            return agent_response
+
+        return "\n".join(
+            [
+                "User quoted your prompt:",
+                selected_quote_text,
+                "",
+                "User reply:",
+                agent_response,
+            ]
+        )
 
     async def _resolve_pending_prompt(
         self,
@@ -765,7 +796,7 @@ class TelegramPromptClient:
         if caption:
             lines.append(f"Caption: {caption}")
         lines.append(f"User attached file: {saved_path}")
-        if original_file_name:
+        if original_file_name and Path(saved_path).name != original_file_name:
             lines.append(f"Original file name: {original_file_name}")
 
         return TelegramReplyResolution(self._format_structured_reply(reply_type, lines))
@@ -888,6 +919,20 @@ class TelegramPromptClient:
         """Read the Telegram message id or return 0 if missing."""
         message_id = message.get("message_id")
         return message_id if isinstance(message_id, int) else 0
+
+    @staticmethod
+    def _extract_selected_quote_text(message: dict[str, Any]) -> Optional[str]:
+        """Read Telegram's manual selected quote, if the reply includes one."""
+        quote = message.get("quote")
+        if not isinstance(quote, dict):
+            return None
+
+        quote_text = quote.get("text")
+        if not isinstance(quote_text, str):
+            return None
+
+        cleaned_quote_text = quote_text.strip()
+        return cleaned_quote_text or None
 
     async def _message_predates_latest_prompt(self, message: dict[str, Any]) -> bool:
         """Ignore backlog messages that Telegram delivers after a fresh prompt starts."""

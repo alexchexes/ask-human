@@ -110,19 +110,23 @@ class TelegramBrokerClient:
 
     async def _ensure_local_broker(self) -> TelegramBrokerHealth:
         """Reuse a healthy broker for this target, or start one if needed."""
-        existing_health = await self._probe_persisted_broker()
+        existing_health = await self._probe_persisted_broker(replace_mismatched=False)
         if existing_health is not None:
             return existing_health
 
         with acquire_startup_lock(self.target_state_dir):
-            existing_health = await self._probe_persisted_broker()
+            existing_health = await self._probe_persisted_broker(replace_mismatched=True)
             if existing_health is not None:
                 return existing_health
 
             self._spawn_local_broker()
             return await self._wait_for_local_broker()
 
-    async def _probe_persisted_broker(self) -> Optional[TelegramBrokerHealth]:
+    async def _probe_persisted_broker(
+        self,
+        *,
+        replace_mismatched: bool = False,
+    ) -> Optional[TelegramBrokerHealth]:
         """Read persisted broker state and verify that the broker is still healthy."""
         state = load_broker_state(self.target_state_dir)
         if state is None or not state.listen_url:
@@ -137,6 +141,8 @@ class TelegramBrokerClient:
             return None
 
         if health.version != __version__:
+            if not replace_mismatched:
+                return None
             shutdown_succeeded = await self._shutdown_broker(state.listen_url)
             if not shutdown_succeeded:
                 raise TelegramPromptError(

@@ -380,6 +380,8 @@ In `both` mode:
 Telegram reply behavior:
 
 - use Telegram's Reply feature on the bot's question message
+- if you select part of the bot message before replying, that selected quote is
+  included in the agent-facing response
 - long text replies that Telegram splits into multiple reply messages are
   recombined when the split parts still reply to the same bot message
 - if a local broker is actively waiting and you send a non-reply message, it sends
@@ -558,7 +560,8 @@ best-effort but are not scrollable yet.
 
 Returns one of:
 
-- `User response: ...` when the user answers
+- `User reply: ...` when the user answers through a local dialog
+- `Replied via Telegram: ...` when the user answers through Telegram
 - `Empty response received` when the user clicks OK without text
 - `Timeout: ...` when no response arrives in time
 - `Cancelled: ...` when the user cancels

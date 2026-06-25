@@ -70,6 +70,7 @@ class TelegramPendingPrompt:
     prompt_id: str
     download_dir: Path
     text_reply_parts: list[str] = field(default_factory=list)
+    selected_quote_text: Optional[str] = None
     text_reply_ack_message_id: Optional[int] = None
     text_reply_finalize_task: Optional[asyncio.Task[None]] = None
 
