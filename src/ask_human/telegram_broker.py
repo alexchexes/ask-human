@@ -4,7 +4,7 @@ import asyncio
 import socket
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import uvicorn
 from starlette.applications import Starlette
@@ -64,8 +64,9 @@ def build_broker_health_payload(
 async def _wait_for_prompt_or_client_disconnect(
     request: Request,
     prompt_task: asyncio.Task[Optional[str]],
+    shutdown_event: Optional[asyncio.Event] = None,
 ) -> Optional[str]:
-    """Wait for one Telegram prompt while cancelling it if the HTTP client goes away."""
+    """Wait for one Telegram prompt while cancelling it if the caller or broker stops."""
     while True:
         done, _pending = await asyncio.wait(
             {prompt_task},
@@ -74,6 +75,14 @@ async def _wait_for_prompt_or_client_disconnect(
         )
         if prompt_task in done:
             return await prompt_task
+
+        if shutdown_event is not None and shutdown_event.is_set():
+            prompt_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await prompt_task
+            raise BrokerPromptClientDisconnected(
+                "Broker shutdown requested before Telegram reply arrived."
+            )
 
         if await request.is_disconnected():
             prompt_task.cancel()
@@ -90,6 +99,8 @@ def create_telegram_broker_app(
     listen_url: str,
     telegram_client: TelegramPromptClient,
     target_key: str,
+    shutdown_event: Optional[asyncio.Event] = None,
+    request_shutdown: Optional[Callable[[], None]] = None,
 ) -> Starlette:
     """Create the broker HTTP app."""
 
@@ -110,14 +121,17 @@ def create_telegram_broker_app(
                 status_code=400,
             )
 
-        prompt_text = payload.get("prompt_text")
+        prompt_texts = _parse_prompt_texts_payload(payload)
         prompt_id = payload.get("prompt_id")
         timeout_seconds = payload.get("timeout_seconds")
         download_dir_raw = payload.get("download_dir")
 
-        if not isinstance(prompt_text, str) or not prompt_text.strip():
+        if not prompt_texts:
             return JSONResponse(
-                {"status": "error", "error": "prompt_text must be a non-empty string."},
+                {
+                    "status": "error",
+                    "error": "prompt_texts must contain at least one non-empty string.",
+                },
                 status_code=400,
             )
         if not isinstance(prompt_id, str) or not prompt_id.strip():
@@ -141,14 +155,18 @@ def create_telegram_broker_app(
 
         prompt_task = asyncio.create_task(
             telegram_client.ask_question(
-                prompt_text,
+                prompt_texts,
                 timeout_seconds,
                 prompt_id,
                 download_dir,
             )
         )
         try:
-            response = await _wait_for_prompt_or_client_disconnect(request, prompt_task)
+            response = await _wait_for_prompt_or_client_disconnect(
+                request,
+                prompt_task,
+                shutdown_event,
+            )
         except BrokerPromptClientDisconnected as exc:
             return JSONResponse(
                 {"status": "cancelled", "error": str(exc)},
@@ -162,13 +180,47 @@ def create_telegram_broker_app(
 
         return JSONResponse({"status": "ok", "response": response})
 
+    async def shutdown(_request: Request) -> JSONResponse:
+        if shutdown_event is not None:
+            shutdown_event.set()
+            await asyncio.sleep(BROKER_DISCONNECT_POLL_SECONDS)
+        try:
+            await telegram_client.shutdown()
+        except TelegramPromptError as exc:
+            return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+        if request_shutdown is not None:
+            asyncio.create_task(_request_shutdown_soon(request_shutdown))
+
+        return JSONResponse({"status": "ok"})
+
     return Starlette(
         debug=False,
         routes=[
             Route("/health", endpoint=health, methods=["GET"]),
             Route("/prompts", endpoint=prompts, methods=["POST"]),
+            Route("/shutdown", endpoint=shutdown, methods=["POST"]),
         ],
     )
+
+
+async def _request_shutdown_soon(request_shutdown: Callable[[], None]) -> None:
+    """Let the shutdown response flush before asking uvicorn to stop."""
+    await asyncio.sleep(0.05)
+    request_shutdown()
+
+
+def _parse_prompt_texts_payload(payload: dict[str, Any]) -> list[str]:
+    """Parse the new multipart prompt payload, accepting the old single-text shape."""
+    prompt_texts = payload.get("prompt_texts")
+    if isinstance(prompt_texts, list):
+        return [item for item in prompt_texts if isinstance(item, str) and item.strip()]
+
+    prompt_text = payload.get("prompt_text")
+    if isinstance(prompt_text, str) and prompt_text.strip():
+        return [prompt_text]
+
+    return []
 
 
 def _create_bound_socket(host: str, port: int) -> socket.socket:
@@ -197,6 +249,14 @@ def run_telegram_broker(
         actual_port = int(server_socket.getsockname()[1])
         listen_url = build_broker_listen_url(host, actual_port)
         persist_broker_listen_url(state_dir, listen_url)
+        shutdown_event = asyncio.Event()
+        server_holder: dict[str, uvicorn.Server] = {}
+
+        def request_shutdown() -> None:
+            server = server_holder.get("server")
+            if server is not None:
+                server.should_exit = True
+
         telegram_client = TelegramPromptClient(
             telegram_target,
             broker_identity=identity,
@@ -206,9 +266,12 @@ def run_telegram_broker(
             listen_url=listen_url,
             telegram_client=telegram_client,
             target_key=target_key,
+            shutdown_event=shutdown_event,
+            request_shutdown=request_shutdown,
         )
         config = uvicorn.Config(app, host=host, port=actual_port, log_level="info")
         server = uvicorn.Server(config)
+        server_holder["server"] = server
         try:
             asyncio.run(server.serve(sockets=[server_socket]))
         except KeyboardInterrupt:

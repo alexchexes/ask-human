@@ -45,6 +45,7 @@ MCP_SERVER_INSTRUCTIONS = (
 mcp = FastMCP("ask-human", instructions=MCP_SERVER_INSTRUCTIONS)
 
 DEFAULT_RESPONSE_CHANNEL = "dialog"
+MAX_PROMPT_CHARACTERS = 8000
 
 
 # Custom exception classes for better error handling (Task 1.4)
@@ -237,8 +238,9 @@ async def ask_human(question: str, context: str = "") -> str:
     Use normal multiline Markdown and preserve paragraph and list breaks.
 
     Args:
-        question: The question or request shown to the human (max 1000 characters)
-        context: Context or additional information shown before the question (max 2000 characters)
+        question: The question or request shown to the human
+        context: Context or additional information shown before the question
+            (max 8000 characters total across question and context)
 
     Returns:
         The human's response with a status prefix, or an error description.
@@ -253,9 +255,11 @@ async def ask_human(question: str, context: str = "") -> str:
     if len(question.strip()) == 0:
         return "❌ Error: 'question' cannot be empty or only whitespace"
 
-    if len(question) > 1000:
+    if len(question) + len(context) > MAX_PROMPT_CHARACTERS:
         return (
-            "❌ Error: 'question' is too long (max 1000 characters). Please shorten your question."
+            "❌ Error: prompt is too long "
+            f"(max {MAX_PROMPT_CHARACTERS} characters total across question and context). "
+            "Please shorten it."
         )
 
     if not isinstance(timeout_seconds, int):
@@ -263,8 +267,6 @@ async def ask_human(question: str, context: str = "") -> str:
 
     if timeout_seconds < 1:
         return "❌ Error: 'timeout_seconds' must be at least 1 second"
-    if len(context) > 2000:
-        return "❌ Error: 'context' is too long (max 2000 characters). Please provide a more concise context."
 
     try:
         issued_at = dt.datetime.now().astimezone()

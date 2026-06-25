@@ -3,9 +3,20 @@
 import asyncio
 import datetime as dt
 
-from ask_human.broker_state import TelegramBrokerHealth
+import pytest
+
+from ask_human import __version__
+from ask_human.broker_state import (
+    TelegramBrokerHealth,
+    load_or_create_broker_identity,
+    persist_broker_listen_url,
+)
 from ask_human.telegram_broker_client import TelegramBrokerClient
-from ask_human.telegram_models import TelegramConfig
+from ask_human.telegram_models import (
+    TelegramConfig,
+    TelegramPromptError,
+    resolve_telegram_target_key,
+)
 
 
 def test_broker_client_builds_prompt_with_broker_metadata(monkeypatch, tmp_path):
@@ -53,6 +64,7 @@ def test_broker_client_builds_prompt_with_broker_metadata(monkeypatch, tmp_path)
     assert captured["method"] == "POST"
     assert "Prompt ID: QTEST-1234" in captured["payload"]["prompt_text"]
     assert "Broker: Alex Laptop [abcd1234]" in captured["payload"]["prompt_text"]
+    assert captured["payload"]["prompt_texts"] == [captured["payload"]["prompt_text"]]
     assert captured["payload"]["download_dir"] == str((tmp_path / "downloads").resolve())
 
 
@@ -93,6 +105,103 @@ def test_broker_client_waits_for_started_broker(monkeypatch, tmp_path):
     assert result == health
     assert calls["spawn"] == 1
     assert calls["probe"] >= 2
+
+
+def test_broker_client_shuts_down_version_mismatched_broker(monkeypatch, tmp_path):
+    """Replace a broker from another package version before sending prompts."""
+    telegram_target = TelegramConfig("123456:ABCDEF", "-1009876543210")
+    client = TelegramBrokerClient(
+        telegram_target,
+        tmp_path / "downloads",
+        broker_state_root=tmp_path / "state",
+    )
+    identity = load_or_create_broker_identity(client.target_state_dir, broker_label="old")
+    persist_broker_listen_url(client.target_state_dir, "http://127.0.0.1:7456")
+    shutdown_calls = []
+
+    async def fake_fetch_health(listen_url):
+        return TelegramBrokerHealth(
+            broker_id=identity.broker_id,
+            broker_label=identity.broker_label,
+            listen_url=listen_url,
+            target_key=resolve_telegram_target_key(telegram_target),
+            version="0.0.0",
+        )
+
+    async def fake_shutdown_broker(listen_url):
+        shutdown_calls.append(listen_url)
+        return True
+
+    monkeypatch.setattr(client, "_fetch_health", fake_fetch_health)
+    monkeypatch.setattr(client, "_shutdown_broker", fake_shutdown_broker)
+
+    result = asyncio.run(client._probe_persisted_broker())
+
+    assert result is None
+    assert shutdown_calls == ["http://127.0.0.1:7456"]
+
+
+def test_broker_client_refuses_when_mismatched_broker_cannot_shutdown(
+    monkeypatch,
+    tmp_path,
+):
+    """Avoid starting a competing broker when the old broker cannot shut down."""
+    telegram_target = TelegramConfig("123456:ABCDEF", "-1009876543210")
+    client = TelegramBrokerClient(
+        telegram_target,
+        tmp_path / "downloads",
+        broker_state_root=tmp_path / "state",
+    )
+    identity = load_or_create_broker_identity(client.target_state_dir, broker_label="old")
+    persist_broker_listen_url(client.target_state_dir, "http://127.0.0.1:7456")
+
+    async def fake_fetch_health(listen_url):
+        return TelegramBrokerHealth(
+            broker_id=identity.broker_id,
+            broker_label=identity.broker_label,
+            listen_url=listen_url,
+            target_key=resolve_telegram_target_key(telegram_target),
+            version="0.0.0",
+        )
+
+    async def fake_shutdown_broker(listen_url):
+        return False
+
+    monkeypatch.setattr(client, "_fetch_health", fake_fetch_health)
+    monkeypatch.setattr(client, "_shutdown_broker", fake_shutdown_broker)
+
+    with pytest.raises(TelegramPromptError, match="Tell the user to stop"):
+        asyncio.run(client._probe_persisted_broker())
+
+
+def test_broker_client_reuses_same_version_broker(monkeypatch, tmp_path):
+    """Keep using persisted brokers that match the current package version."""
+    telegram_target = TelegramConfig("123456:ABCDEF", "-1009876543210")
+    client = TelegramBrokerClient(
+        telegram_target,
+        tmp_path / "downloads",
+        broker_state_root=tmp_path / "state",
+    )
+    identity = load_or_create_broker_identity(client.target_state_dir, broker_label="current")
+    persist_broker_listen_url(client.target_state_dir, "http://127.0.0.1:7456")
+    health = TelegramBrokerHealth(
+        broker_id=identity.broker_id,
+        broker_label=identity.broker_label,
+        listen_url="http://127.0.0.1:7456",
+        target_key=resolve_telegram_target_key(telegram_target),
+        version=__version__,
+    )
+
+    async def fake_fetch_health(_listen_url):
+        return health
+
+    async def fail_shutdown(_listen_url):
+        raise AssertionError("Same-version broker should not be shut down")
+
+    monkeypatch.setattr(client, "_fetch_health", fake_fetch_health)
+    monkeypatch.setattr(client, "_shutdown_broker", fail_shutdown)
+
+    assert asyncio.run(client._probe_persisted_broker()) == health
 
 
 def test_broker_client_target_state_dir_is_per_target(tmp_path):

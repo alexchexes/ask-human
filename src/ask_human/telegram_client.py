@@ -29,6 +29,7 @@ class TelegramPromptClient:
 
     ISSUE_URL = "https://github.com/alexchexes/ask-human/issues"
     PROMPT_PARSE_MODE = "HTML"
+    SHUTDOWN_TIMEOUT_SECONDS = DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS + 15
     TEXT_REPLY_SPLIT_DEBOUNCE_SECONDS = 0.7
     TEXT_REPLY_SPLIT_MIN_LENGTH = 3500
     NON_REPLY_HINT_TEXT = "⚠️ Message is ignored. Please use Reply on the bot's message."
@@ -60,25 +61,29 @@ class TelegramPromptClient:
 
     async def ask_question(
         self,
-        prompt_text: str,
+        prompt_text: str | list[str],
         timeout: int,
         prompt_id: str,
         download_dir: Optional[Path] = None,
     ) -> Optional[str]:
-        """Send a prompt message and wait for a reply to that specific message."""
-        message_id = await self._send_prompt(prompt_text)
-        response_future = asyncio.get_running_loop().create_future()
+        """Send prompt message(s) and wait for one reply to any of them."""
+        prompt_texts = self._normalize_prompt_texts(prompt_text)
         resolved_download_dir = download_dir or self.download_dir
         if resolved_download_dir is None:
             raise TelegramPromptError("No Telegram download directory was configured.")
 
+        message_ids = await self._send_prompt_messages(prompt_texts)
+        response_future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        pending_prompt = TelegramPendingPrompt(
+            future=response_future,
+            prompt_id=prompt_id,
+            download_dir=resolved_download_dir,
+        )
+
         async with self._lock:
-            self._pending_by_message_id[message_id] = TelegramPendingPrompt(
-                future=response_future,
-                prompt_id=prompt_id,
-                download_dir=resolved_download_dir,
-            )
-            self._latest_prompt_message_id = message_id
+            for message_id in message_ids:
+                self._pending_by_message_id[message_id] = pending_prompt
+            self._latest_prompt_message_id = message_ids[-1]
             self._ensure_poller_locked()
 
         try:
@@ -88,14 +93,61 @@ class TelegramPromptClient:
         finally:
             finalize_task: Optional[asyncio.Task[None]] = None
             async with self._lock:
-                pending_prompt = self._pending_by_message_id.pop(message_id, None)
-                if pending_prompt is not None:
-                    finalize_task = pending_prompt.text_reply_finalize_task
-                    pending_prompt.text_reply_finalize_task = None
-                if not self._pending_by_message_id:
-                    self._latest_prompt_message_id = None
+                finalize_task = self._remove_pending_prompt_locked(pending_prompt)
             if finalize_task is not None:
                 finalize_task.cancel()
+
+    async def shutdown(self, *, timeout: float = SHUTDOWN_TIMEOUT_SECONDS) -> None:
+        """Fail pending prompts and wait until Telegram polling has stopped."""
+        poller_task: Optional[asyncio.Task[None]]
+        finalize_tasks: list[asyncio.Task[None]] = []
+        async with self._lock:
+            pending_prompts = self._unique_pending_prompts_locked()
+            self._pending_by_message_id.clear()
+            self._latest_prompt_message_id = None
+            poller_task = self._poller_task
+
+            for pending_prompt in pending_prompts:
+                if pending_prompt.text_reply_finalize_task is not None:
+                    finalize_tasks.append(pending_prompt.text_reply_finalize_task)
+                    pending_prompt.text_reply_finalize_task = None
+                if not pending_prompt.future.done():
+                    pending_prompt.future.set_exception(
+                        TelegramPromptError("Telegram broker shutdown requested.")
+                    )
+
+        for finalize_task in finalize_tasks:
+            finalize_task.cancel()
+
+        if poller_task is None or poller_task.done():
+            return
+
+        try:
+            await asyncio.wait_for(asyncio.shield(poller_task), timeout)
+        except asyncio.TimeoutError as exc:
+            raise TelegramPromptError(
+                "Telegram polling did not stop before the broker shutdown timeout."
+            ) from exc
+
+    @staticmethod
+    def _normalize_prompt_texts(prompt_text: str | list[str]) -> list[str]:
+        """Normalize one prompt string or a multipart prompt list."""
+        if isinstance(prompt_text, str):
+            prompt_texts = [prompt_text]
+        else:
+            prompt_texts = prompt_text
+
+        cleaned_prompt_texts = [text for text in prompt_texts if text.strip()]
+        if not cleaned_prompt_texts:
+            raise TelegramPromptError("Prompt text must contain at least one non-empty message.")
+        return cleaned_prompt_texts
+
+    async def _send_prompt_messages(self, prompt_texts: list[str]) -> list[int]:
+        """Send all outbound prompt messages and return their message ids."""
+        message_ids = []
+        for prompt_text in prompt_texts:
+            message_ids.append(await self._send_prompt(prompt_text))
+        return message_ids
 
     async def _send_prompt(self, prompt_text: str) -> int:
         """Send the outbound Telegram message and return its message id."""
@@ -190,7 +242,7 @@ class TelegramPromptClient:
                     return
         except Exception as exc:
             async with self._lock:
-                pending_items = list(self._pending_by_message_id.values())
+                pending_items = self._unique_pending_prompts_locked()
                 self._pending_by_message_id.clear()
                 self._poller_task = None
 
@@ -348,11 +400,7 @@ class TelegramPromptClient:
                 and not current_pending.future.done()
             ):
                 current_pending.future.set_result(agent_response)
-                self._pending_by_message_id.pop(prompt_message_id, None)
-                finalize_task = current_pending.text_reply_finalize_task
-                current_pending.text_reply_finalize_task = None
-                if not self._pending_by_message_id:
-                    self._latest_prompt_message_id = None
+                finalize_task = self._remove_pending_prompt_locked(current_pending)
                 should_ack = True
 
         if finalize_task is not None and finalize_task is not asyncio.current_task():
@@ -363,6 +411,39 @@ class TelegramPromptClient:
                 f"✅ Received [{pending_prompt.prompt_id}]",
                 reply_to_message_id=reply_to_message_id,
             )
+
+    def _remove_pending_prompt_locked(
+        self,
+        pending_prompt: TelegramPendingPrompt,
+    ) -> Optional[asyncio.Task[None]]:
+        """Remove every message-id alias for one pending prompt."""
+        message_ids = [
+            message_id
+            for message_id, current_pending in self._pending_by_message_id.items()
+            if current_pending is pending_prompt
+        ]
+        for message_id in message_ids:
+            self._pending_by_message_id.pop(message_id, None)
+
+        finalize_task = pending_prompt.text_reply_finalize_task
+        pending_prompt.text_reply_finalize_task = None
+        if not self._pending_by_message_id:
+            self._latest_prompt_message_id = None
+        elif self._latest_prompt_message_id in message_ids:
+            self._latest_prompt_message_id = max(self._pending_by_message_id)
+        return finalize_task
+
+    def _unique_pending_prompts_locked(self) -> list[TelegramPendingPrompt]:
+        """Return unique pending prompts from the message-id index."""
+        pending_items: list[TelegramPendingPrompt] = []
+        seen_ids: set[int] = set()
+        for pending_prompt in self._pending_by_message_id.values():
+            pending_identity = id(pending_prompt)
+            if pending_identity in seen_ids:
+                continue
+            seen_ids.add(pending_identity)
+            pending_items.append(pending_prompt)
+        return pending_items
 
     async def _match_pending_prompt(
         self, update: dict[str, Any]

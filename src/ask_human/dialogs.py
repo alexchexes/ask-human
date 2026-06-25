@@ -2,14 +2,19 @@
 
 import asyncio
 import platform
+import re
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, Callable, Optional, cast
 
 from .prompt_formatting import resolve_dialog_title
 
 DEFAULT_DIALOG_TIMEOUT_SECONDS = 120
 PACKAGE_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+WINDOWS_DIALOG_SCREEN_WIDTH_RATIO = 0.85
+WINDOWS_DIALOG_MIN_WRAP_WIDTH_PX = 600
+WINDOWS_DIALOG_MAX_WRAP_WIDTH_PX = 1400
+WHITESPACE_PATTERN = re.compile(r"(\s+)")
 
 
 class UserPromptCancelled(Exception):
@@ -250,6 +255,7 @@ class GUIDialogHandler:
             self._configure_windows_tk_scaling(root)
             root.withdraw()
             self._set_windows_icon(root)
+            question = self._wrap_windows_question(root, question)
 
             return self._ask_windows_string(
                 root,
@@ -266,6 +272,17 @@ class GUIDialogHandler:
                     root.destroy()
                 except Exception:
                     pass
+
+    def _wrap_windows_question(self, root: Any, question: str) -> str:
+        """Wrap the prompt before handing it to simpledialog's non-scrolling label."""
+        try:
+            import tkinter.font as tkfont
+
+            default_font = tkfont.nametofont("TkDefaultFont")
+            wrap_width_px = _resolve_windows_wrap_width_px(root)
+            return wrap_text_by_pixel_width(question, default_font.measure, wrap_width_px)
+        except Exception:
+            return question
 
     def _ask_windows_string(
         self,
@@ -309,3 +326,84 @@ class GUIDialogHandler:
             root.iconbitmap(icon_path)
         except Exception:
             pass
+
+
+def _resolve_windows_wrap_width_px(root: Any) -> int:
+    """Resolve a best-effort label wrap width for the current Windows screen."""
+    screen_width = int(root.winfo_screenwidth())
+    wrapped_width = int(screen_width * WINDOWS_DIALOG_SCREEN_WIDTH_RATIO)
+    return max(
+        WINDOWS_DIALOG_MIN_WRAP_WIDTH_PX,
+        min(wrapped_width, WINDOWS_DIALOG_MAX_WRAP_WIDTH_PX),
+    )
+
+
+def wrap_text_by_pixel_width(
+    text: str,
+    measure_text: Callable[[str], int],
+    max_width_px: int,
+) -> str:
+    """Wrap text by rendered pixel width, hard-breaking tokens that cannot fit."""
+    if max_width_px <= 0:
+        return text
+
+    wrapped_lines: list[str] = []
+    for raw_line in text.split("\n"):
+        if raw_line == "":
+            wrapped_lines.append("")
+            continue
+        wrapped_lines.extend(_wrap_line_by_pixel_width(raw_line, measure_text, max_width_px))
+
+    return "\n".join(wrapped_lines)
+
+
+def _wrap_line_by_pixel_width(
+    line: str,
+    measure_text: Callable[[str], int],
+    max_width_px: int,
+) -> list[str]:
+    """Wrap one line by spaces first, then hard-break too-long tokens."""
+    lines: list[str] = []
+    current = ""
+
+    for token in WHITESPACE_PATTERN.split(line):
+        if token == "":
+            continue
+        token_parts = (
+            _split_token_by_pixel_width(token, measure_text, max_width_px)
+            if not token.isspace() and measure_text(token) > max_width_px
+            else [token]
+        )
+        for token_part in token_parts:
+            candidate = f"{current}{token_part}"
+            if not current or measure_text(candidate.rstrip()) <= max_width_px:
+                current = candidate
+                continue
+
+            lines.append(current.rstrip())
+            current = "" if token_part.isspace() else token_part.lstrip()
+
+    if current:
+        lines.append(current.rstrip())
+    return lines or [line]
+
+
+def _split_token_by_pixel_width(
+    token: str,
+    measure_text: Callable[[str], int],
+    max_width_px: int,
+) -> list[str]:
+    """Hard-break one no-space token so each piece fits the target width."""
+    chunks: list[str] = []
+    current = ""
+    for character in token:
+        candidate = f"{current}{character}"
+        if current and measure_text(candidate) > max_width_px:
+            chunks.append(current)
+            current = character
+        else:
+            current = candidate
+
+    if current:
+        chunks.append(current)
+    return chunks

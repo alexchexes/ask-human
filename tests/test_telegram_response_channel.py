@@ -8,8 +8,10 @@ import pytest
 from ask_human import server
 from ask_human.broker_state import TelegramBrokerIdentity
 from ask_human.prompt_formatting import (
+    TELEGRAM_MESSAGE_CHAR_LIMIT,
     build_dialog_telegram_notice,
     build_telegram_prompt_text,
+    build_telegram_prompt_texts,
     render_markdown_to_telegram_html,
     telegram_html_to_plain_text,
 )
@@ -38,6 +40,46 @@ def test_parse_telegram_target_rejects_invalid_shape():
         parse_telegram_target("123456:ABCDEF")
 
 
+def test_telegram_client_shutdown_waits_for_poller_to_stop(tmp_path):
+    """Do not report broker shutdown complete while a Telegram long-poll is active."""
+
+    async def run_shutdown_flow():
+        client = TelegramPromptClient(
+            TelegramConfig("123456:ABCDEF", "-1009876543210"),
+            download_dir=tmp_path,
+        )
+        poll_started = asyncio.Event()
+        release_poll = asyncio.Event()
+
+        async def fake_bot_api_request(method, payload, timeout):
+            if method == "sendMessage":
+                return {"message_id": 101}
+            if method == "getUpdates":
+                if payload["timeout"] == DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS:
+                    poll_started.set()
+                    await release_poll.wait()
+                return []
+            raise AssertionError(f"Unexpected Telegram method: {method}")
+
+        client._bot_api_request = fake_bot_api_request  # type: ignore[method-assign]
+
+        prompt_task = asyncio.create_task(client.ask_question("Prompt text", 30, "QTEST-1234"))
+        await poll_started.wait()
+
+        shutdown_task = asyncio.create_task(client.shutdown(timeout=1))
+        await asyncio.sleep(0)
+        assert shutdown_task.done() is False
+
+        release_poll.set()
+        await shutdown_task
+
+        with pytest.raises(TelegramPromptError, match="broker shutdown requested"):
+            await prompt_task
+        assert client._poller_task is None
+
+    asyncio.run(run_shutdown_flow())
+
+
 def test_build_dialog_telegram_notice_is_platform_specific():
     """Use the Windows stale-dialog warning only on Windows."""
     assert build_dialog_telegram_notice("Linux") == "📨 Also sent to Telegram."
@@ -64,6 +106,48 @@ def test_build_telegram_prompt_text_adds_prompt_id_and_reply_instruction():
     assert "Prompt ID: QTEST-1234" in prompt_text
     assert "Broker: Alex Laptop [abcd1234]" in prompt_text
     assert '↩️ Use "Reply" on this message to answer.' in prompt_text
+
+
+def test_build_telegram_prompt_texts_keeps_short_prompt_single_message():
+    """Keep existing Telegram prompt shape when it fits in one message."""
+    prompt_kwargs = {
+        "prompt_id": "QTEST-1234",
+        "timeout_seconds": 300,
+        "include_timing_info": False,
+        "broker_label": "Alex Laptop",
+        "broker_id": "abcd1234",
+    }
+
+    assert build_telegram_prompt_texts("Short question?", "Short context.", **prompt_kwargs) == [
+        build_telegram_prompt_text("Short question?", "Short context.", **prompt_kwargs)
+    ]
+
+
+def test_build_telegram_prompt_texts_splits_long_prompt_with_reply_target():
+    """Split long Telegram prompts and leave the final message as the reply target."""
+    long_context = "\n\n".join(f"Context paragraph {index}: " + "word " * 40 for index in range(35))
+    long_question = "Question details: " + "word " * 450
+
+    prompt_texts = build_telegram_prompt_texts(
+        long_question,
+        long_context,
+        prompt_id="QTEST-1234",
+        timeout_seconds=300,
+        include_timing_info=True,
+        broker_label="Alex Laptop",
+        broker_id="abcd1234",
+    )
+
+    assert len(prompt_texts) > 1
+    assert prompt_texts[0].startswith("<b>📋 Context (1/")
+    assert any(message.startswith("<b>❓ Question") for message in prompt_texts)
+    assert "Prompt ID: QTEST-1234" in prompt_texts[-1]
+    assert "Broker: Alex Laptop [abcd1234]" in prompt_texts[-1]
+    assert '↩️ Use "Reply" on this message to answer.' in prompt_texts[-1]
+    assert all(
+        len(telegram_html_to_plain_text(message)) <= TELEGRAM_MESSAGE_CHAR_LIMIT
+        for message in prompt_texts
+    )
 
 
 def test_render_markdown_to_telegram_html_for_common_agent_markdown():
@@ -207,6 +291,60 @@ def test_telegram_client_resolves_reply_to_sent_message(monkeypatch, tmp_path):
 
     assert result == "telegram answer"
     assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
+
+
+def test_telegram_client_accepts_reply_to_any_prompt_chunk(monkeypatch, tmp_path):
+    """Register every multipart prompt message as a valid reply target."""
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 201,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 102},
+                    "text": "telegram answer",
+                },
+            }
+        ],
+        [],
+    ]
+    sent_messages = []
+    prompt_message_ids = iter([101, 102, 103])
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            sent_messages.append(payload)
+            if "parse_mode" in payload:
+                return {"message_id": next(prompt_message_ids)}
+            return {"message_id": 301}
+        if method == "getUpdates":
+            return updates.pop(0)
+        raise AssertionError(f"Unexpected method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    result = asyncio.run(
+        client.ask_question(
+            ["Prompt chunk 1", "Prompt chunk 2", "Prompt metadata"],
+            5,
+            "QTEST-1234",
+        )
+    )
+
+    assert result == "telegram answer"
+    assert [payload["text"] for payload in sent_messages[:3]] == [
+        "Prompt chunk 1",
+        "Prompt chunk 2",
+        "Prompt metadata",
+    ]
+    assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
+    assert sent_messages[-1]["reply_to_message_id"] == 201
+    assert client._pending_by_message_id == {}
 
 
 def test_telegram_client_combines_split_text_replies_in_one_update_page(

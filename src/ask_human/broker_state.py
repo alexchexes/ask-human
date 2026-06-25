@@ -43,6 +43,7 @@ class TelegramBrokerHealth:
     broker_label: str
     listen_url: str
     target_key: str
+    version: str = ""
 
 
 def resolve_broker_state_dir(state_dir: Optional[str] = None) -> Path:

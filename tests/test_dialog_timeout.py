@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 from ask_human import server
+from ask_human.dialogs import wrap_text_by_pixel_width
 from ask_human.server import (
     DEFAULT_DIALOG_TIMEOUT_SECONDS,
     GUIDialogHandler,
@@ -107,6 +108,30 @@ def test_tool_warns_when_dialog_returns_no_response(monkeypatch):
     assert "timed out or been cancelled" in result
 
 
+def test_tool_allows_prompt_at_combined_length_limit(monkeypatch):
+    """Allow question and context to use the full combined prompt budget."""
+
+    class StubDialogHandler:
+        async def get_user_input(self, question, timeout):
+            return "ok"
+
+    monkeypatch.setattr(server, "dialog_handler", StubDialogHandler())
+
+    result = asyncio.run(server.ask_human("Q" * 5000, "C" * 3000))
+
+    assert result == "✅ User response: ok"
+
+
+def test_tool_rejects_prompt_over_combined_length_limit():
+    """Reject prompts that exceed the shared question/context budget."""
+    result = asyncio.run(server.ask_human("Q" * 5000, "C" * 3001))
+
+    assert result == (
+        "❌ Error: prompt is too long "
+        "(max 8000 characters total across question and context). Please shorten it."
+    )
+
+
 def test_windows_string_dialog_schedules_timeout():
     """Schedule timeout inside Tk so Windows askstring is no longer unbounded."""
     handler = GUIDialogHandler()
@@ -125,6 +150,21 @@ def test_windows_string_dialog_schedules_timeout():
     assert root.after_calls == [(1200 * 1000, root.destroy)]
     assert root.after_cancel_calls == ["timeout-id"]
     assert simpledialog.calls == [("Title", "Question?", root)]
+
+
+def test_windows_prompt_wrapping_hard_breaks_long_tokens():
+    """Wrap Windows dialog prompts by measured width and hard-break no-space text."""
+
+    def measure_text(text):
+        return len(text) * 10
+
+    wrapped = wrap_text_by_pixel_width(
+        "alpha beta\n\nabcdefghij",
+        measure_text,
+        50,
+    )
+
+    assert wrapped == "alpha\nbeta\n\nabcde\nfghij"
 
 
 def test_help_mentions_timeout_option():

@@ -545,12 +545,16 @@ ask-human --transport stdio --dialog-title "Codex Needs Input"
 
 ### `ask_human`
 
-Ask the human for input during agent workflows.
+Talk to the human without ending the current turn.
 
 Parameters:
 
-- `question` (string, required): specific question, max 1000 characters
-- `context` (string, optional): short background, max 2000 characters
+- `question` (string, required): specific question or request
+- `context` (string, optional): background shown before the question
+
+`question` and `context` may contain up to 8000 characters combined. Long Telegram
+prompts are split across messages automatically; Windows dialogs wrap long lines
+best-effort but are not scrollable yet.
 
 Returns one of:
 
@@ -584,6 +588,10 @@ python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 ```
+
+When changing Telegram broker/client code during local development, stop any
+running local Telegram broker before retesting. Otherwise the detached broker may
+keep running old code from before your edit.
 
 Run checks:
 

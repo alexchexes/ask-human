@@ -10,15 +10,23 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
+from . import __version__
 from .broker_state import (
     TelegramBrokerHealth,
+    TelegramBrokerState,
     acquire_startup_lock,
     load_broker_state,
     resolve_broker_state_dir,
     resolve_target_broker_state_dir,
 )
-from .prompt_formatting import build_telegram_prompt_text
-from .telegram_models import TelegramConfig, TelegramPromptError
+from .prompt_formatting import build_telegram_prompt_text, build_telegram_prompt_texts
+from .telegram_models import (
+    DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS,
+    TelegramConfig,
+    TelegramPromptError,
+)
+
+BROKER_SHUTDOWN_TIMEOUT_SECONDS = DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS + 20
 
 
 class TelegramBrokerClient:
@@ -63,6 +71,16 @@ class TelegramBrokerClient:
             broker_label=broker_health.broker_label,
             broker_id=broker_health.broker_id,
         )
+        prompt_texts = build_telegram_prompt_texts(
+            question,
+            context,
+            prompt_id=prompt_id,
+            timeout_seconds=timeout_seconds,
+            include_timing_info=include_timing_info,
+            issued_at=issued_at,
+            broker_label=broker_health.broker_label,
+            broker_id=broker_health.broker_id,
+        )
 
         response = await self._broker_request(
             broker_health.listen_url,
@@ -70,6 +88,7 @@ class TelegramBrokerClient:
             {
                 "prompt_id": prompt_id,
                 "prompt_text": prompt_text,
+                "prompt_texts": prompt_texts,
                 "timeout_seconds": timeout_seconds,
                 "download_dir": str(self.download_dir),
             },
@@ -114,7 +133,17 @@ class TelegramBrokerClient:
         except TelegramPromptError:
             return None
 
-        if health.broker_id != state.identity.broker_id:
+        if not self._health_matches_state(health, state):
+            return None
+
+        if health.version != __version__:
+            shutdown_succeeded = await self._shutdown_broker(state.listen_url)
+            if not shutdown_succeeded:
+                raise TelegramPromptError(
+                    "A local Telegram broker from a different ask-human version is still "
+                    "running and cannot be shut down automatically. Tell the user to stop "
+                    "the local ask-human Telegram broker manually, then retry the question."
+                )
             return None
 
         return health
@@ -128,7 +157,9 @@ class TelegramBrokerClient:
             state = load_broker_state(self.target_state_dir)
             if state is not None and state.listen_url:
                 try:
-                    return await self._fetch_health(state.listen_url)
+                    health = await self._fetch_health(state.listen_url)
+                    if self._health_matches_state(health, state) and health.version == __version__:
+                        return health
                 except TelegramPromptError as exc:
                     last_error = str(exc)
 
@@ -194,7 +225,33 @@ class TelegramBrokerClient:
             broker_label=broker_label,
             listen_url=response_listen_url,
             target_key=target_key,
+            version=str(response.get("version", "")),
         )
+
+    def _health_matches_state(
+        self,
+        health: TelegramBrokerHealth,
+        state: TelegramBrokerState,
+    ) -> bool:
+        """Verify that a health response belongs to this persisted broker target."""
+        return (
+            health.broker_id == state.identity.broker_id
+            and health.target_key == self.target_state_dir.name
+        )
+
+    async def _shutdown_broker(self, listen_url: str) -> bool:
+        """Ask a running broker to terminate itself."""
+        try:
+            response = await self._broker_request(
+                listen_url,
+                "shutdown",
+                {},
+                timeout=BROKER_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+        except TelegramPromptError:
+            return False
+
+        return response.get("status") == "ok"
 
     async def _broker_request(
         self,

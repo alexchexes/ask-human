@@ -137,6 +137,126 @@ def test_broker_prompt_cancels_when_client_disconnects(monkeypatch, tmp_path):
     assert telegram_client.cancelled is True
 
 
+def test_broker_shutdown_cancels_pending_prompt(monkeypatch, tmp_path):
+    """Cancel pending Telegram prompts before shutting the broker down."""
+    monkeypatch.setattr(
+        "ask_human.telegram_broker.BROKER_DISCONNECT_POLL_SECONDS",
+        0.01,
+    )
+
+    class FakePromptRequest:
+        async def json(self):
+            return {
+                "prompt_texts": ["Prompt text"],
+                "prompt_id": "QTEST-1234",
+                "timeout_seconds": 300,
+                "download_dir": str(tmp_path),
+            }
+
+        async def is_disconnected(self):
+            return False
+
+    class FakeShutdownRequest:
+        pass
+
+    class FakeTelegramClient:
+        def __init__(self):
+            self.cancelled = False
+            self.shutdown_called = False
+
+        async def ask_question(self, prompt_texts, timeout_seconds, prompt_id, download_dir):
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+        async def shutdown(self):
+            self.shutdown_called = True
+
+    shutdown_event = asyncio.Event()
+    shutdown_calls = []
+    telegram_client = FakeTelegramClient()
+    app = create_telegram_broker_app(
+        TelegramBrokerIdentity("abcd1234", "office"),
+        listen_url="http://127.0.0.1:7456",
+        telegram_client=cast(Any, telegram_client),
+        target_key="feedbeef",
+        shutdown_event=shutdown_event,
+        request_shutdown=lambda: shutdown_calls.append("shutdown"),
+    )
+    prompts_route = cast(
+        Any,
+        next(route for route in app.routes if getattr(route, "path", None) == "/prompts"),
+    )
+    shutdown_route = cast(
+        Any,
+        next(route for route in app.routes if getattr(route, "path", None) == "/shutdown"),
+    )
+
+    async def run_shutdown_flow():
+        prompt_task = asyncio.create_task(prompts_route.endpoint(FakePromptRequest()))
+        await asyncio.sleep(0)
+        shutdown_response = await shutdown_route.endpoint(FakeShutdownRequest())
+        prompt_response = await prompt_task
+        await asyncio.sleep(0.1)
+        return shutdown_response, prompt_response
+
+    shutdown_response, prompt_response = asyncio.run(run_shutdown_flow())
+
+    assert shutdown_response.status_code == 200
+    assert b'"status":"ok"' in shutdown_response.body
+    assert prompt_response.status_code == 499
+    assert b"Broker shutdown requested" in prompt_response.body
+    assert telegram_client.cancelled is True
+    assert telegram_client.shutdown_called is True
+    assert shutdown_calls == ["shutdown"]
+
+
+def test_broker_prompt_forwards_multipart_prompt_texts(monkeypatch, tmp_path):
+    """Forward every prompt message from the broker request to Telegram."""
+
+    class FakeRequest:
+        async def json(self):
+            return {
+                "prompt_texts": ["Prompt part 1", "Prompt part 2"],
+                "prompt_id": "QTEST-1234",
+                "timeout_seconds": 300,
+                "download_dir": str(tmp_path),
+            }
+
+        async def is_disconnected(self):
+            return False
+
+    class FakeTelegramClient:
+        def __init__(self):
+            self.calls = []
+
+        async def ask_question(self, prompt_texts, timeout_seconds, prompt_id, download_dir):
+            self.calls.append((prompt_texts, timeout_seconds, prompt_id, download_dir))
+            return "telegram answer"
+
+    telegram_client = FakeTelegramClient()
+    app = create_telegram_broker_app(
+        TelegramBrokerIdentity("abcd1234", "office"),
+        listen_url="http://127.0.0.1:7456",
+        telegram_client=cast(Any, telegram_client),
+        target_key="feedbeef",
+    )
+    prompts_route = cast(
+        Any,
+        next(route for route in app.routes if getattr(route, "path", None) == "/prompts"),
+    )
+
+    response = asyncio.run(prompts_route.endpoint(FakeRequest()))
+
+    assert response.status_code == 200
+    assert b'"status":"ok"' in response.body
+    assert telegram_client.calls == [
+        (["Prompt part 1", "Prompt part 2"], 300, "QTEST-1234", tmp_path.resolve())
+    ]
+
+
 def test_main_runs_telegram_broker_mode(monkeypatch, tmp_path):
     """Dispatch to broker mode before MCP transport setup."""
     captured = {}
@@ -226,7 +346,7 @@ def test_run_telegram_broker_exits_cleanly_on_keyboard_interrupt(monkeypatch, tm
     )
     monkeypatch.setattr(
         "ask_human.telegram_broker.create_telegram_broker_app",
-        lambda identity, *, listen_url, telegram_client, target_key: object(),
+        lambda identity, **kwargs: object(),
     )
     monkeypatch.setattr(
         "ask_human.telegram_broker.uvicorn.Config",

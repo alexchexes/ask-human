@@ -14,6 +14,8 @@ from markdown_it.token import Token
 DEFAULT_DIALOG_TITLE = "Agent asks..."
 TELEGRAM_DOWNLOAD_LIMIT_LABEL = "20 MB"
 TELEGRAM_PROMPT_SEPARATOR = "─" * 12
+TELEGRAM_MESSAGE_CHAR_LIMIT = 4096
+TELEGRAM_PROMPT_CHUNK_CHAR_LIMIT = 3500
 TIMING_INFO_TIMEOUT_NOTE = "client may time out sooner"
 TELEGRAM_HTML_BLANK_LINES_PATTERN = re.compile(r"\n{3,}")
 TELEGRAM_HTML_LANGUAGE_PATTERN = re.compile(r"^[A-Za-z0-9_+-]+$")
@@ -330,7 +332,6 @@ def build_telegram_prompt_text(
     broker_id: Optional[str] = None,
 ) -> str:
     """Build a Telegram-specific prompt using HTML parse mode and compact metadata."""
-    effective_issued_at = issued_at or dt.datetime.now().astimezone()
     parts: list[str] = []
 
     if context.strip():
@@ -354,6 +355,84 @@ def build_telegram_prompt_text(
         ]
     )
 
+    parts.extend(
+        [
+            _build_telegram_metadata_block(
+                prompt_id=prompt_id,
+                timeout_seconds=timeout_seconds,
+                include_timing_info=include_timing_info,
+                issued_at=issued_at,
+                broker_label=broker_label,
+                broker_id=broker_id,
+            ),
+            "",
+            '↩️ Use "Reply" on this message to answer.',
+        ]
+    )
+
+    return "\n".join(parts)
+
+
+def build_telegram_prompt_texts(
+    question: str,
+    context: str,
+    *,
+    prompt_id: str,
+    timeout_seconds: int,
+    include_timing_info: bool,
+    issued_at: Optional[dt.datetime] = None,
+    broker_label: Optional[str] = None,
+    broker_id: Optional[str] = None,
+) -> list[str]:
+    """Build one or more Telegram prompt messages, splitting only when needed."""
+    full_prompt = build_telegram_prompt_text(
+        question,
+        context,
+        prompt_id=prompt_id,
+        timeout_seconds=timeout_seconds,
+        include_timing_info=include_timing_info,
+        issued_at=issued_at,
+        broker_label=broker_label,
+        broker_id=broker_id,
+    )
+    if _telegram_message_fits(full_prompt):
+        return [full_prompt]
+
+    messages: list[str] = []
+    if context.strip():
+        messages.extend(_build_telegram_section_messages("📋 Context", context.strip()))
+
+    messages.extend(_build_telegram_section_messages("❓ Question", question.strip()))
+    messages.append(
+        "\n".join(
+            [
+                _build_telegram_metadata_block(
+                    prompt_id=prompt_id,
+                    timeout_seconds=timeout_seconds,
+                    include_timing_info=include_timing_info,
+                    issued_at=issued_at,
+                    broker_label=broker_label,
+                    broker_id=broker_id,
+                ),
+                "",
+                '↩️ Use "Reply" on this message to answer.',
+            ]
+        )
+    )
+    return messages
+
+
+def _build_telegram_metadata_block(
+    *,
+    prompt_id: str,
+    timeout_seconds: int,
+    include_timing_info: bool,
+    issued_at: Optional[dt.datetime] = None,
+    broker_label: Optional[str] = None,
+    broker_id: Optional[str] = None,
+) -> str:
+    """Build compact Telegram metadata as an expandable block."""
+    effective_issued_at = issued_at or dt.datetime.now().astimezone()
     metadata_lines: list[str] = []
     if include_timing_info:
         metadata_lines.extend(build_timing_info_lines(effective_issued_at, timeout_seconds))
@@ -366,13 +445,60 @@ def build_telegram_prompt_text(
     )
     if broker_label and broker_id:
         metadata_lines.append(f"Broker: {broker_label} [{broker_id}]")
-    metadata_block = "\n".join(escape_telegram_html(line) for line in metadata_lines)
-    parts.extend(
-        [
-            f"<blockquote expandable>{metadata_block}</blockquote>",
-            "",
-            '↩️ Use "Reply" on this message to answer.',
-        ]
-    )
 
-    return "\n".join(parts)
+    metadata_block = "\n".join(escape_telegram_html(line) for line in metadata_lines)
+    return f"<blockquote expandable>{metadata_block}</blockquote>"
+
+
+def _telegram_message_fits(prompt_text: str) -> bool:
+    """Check Telegram's post-entity message length limit."""
+    return len(telegram_html_to_plain_text(prompt_text)) <= TELEGRAM_MESSAGE_CHAR_LIMIT
+
+
+def _build_telegram_section_messages(label: str, markdown_text: str) -> list[str]:
+    """Build naturally split Telegram section messages for one prompt section."""
+    chunks = _split_text_naturally(markdown_text, TELEGRAM_PROMPT_CHUNK_CHAR_LIMIT)
+    if len(chunks) == 1:
+        headings = [label]
+    else:
+        headings = [f"{label} ({index}/{len(chunks)})" for index in range(1, len(chunks) + 1)]
+
+    return [
+        f"<b>{heading}:</b>\n{render_markdown_to_telegram_html(chunk)}"
+        for heading, chunk in zip(headings, chunks)
+    ]
+
+
+def _split_text_naturally(text: str, max_chars: int) -> list[str]:
+    """Split text on paragraph, line, or word boundaries, with hard fallback splits."""
+    remaining = text.strip()
+    if not remaining:
+        return []
+
+    chunks: list[str] = []
+    while len(remaining) > max_chars:
+        split_at = _find_natural_split(remaining, max_chars)
+        chunk = remaining[:split_at].strip()
+        if not chunk:
+            chunk = remaining[:max_chars]
+            split_at = max_chars
+        chunks.append(chunk)
+        remaining = remaining[split_at:].strip()
+
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+def _find_natural_split(text: str, max_chars: int) -> int:
+    """Find a useful split point near max_chars."""
+    search_window = text[: max_chars + 1]
+    candidates = [
+        search_window.rfind("\n\n"),
+        search_window.rfind("\n"),
+        search_window.rfind(" "),
+    ]
+    best = max(candidates)
+    if best >= max_chars // 2:
+        return best
+    return max_chars
