@@ -10,9 +10,7 @@ Supports Telegram (including files) and local OS dialogs.
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io/)
 
-It gives MCP-capable agents a focused tool for cases where guessing is the wrong move.
-The agent can pause, show the question and relevant context, wait for your answer,
-then continue the same workflow.
+It gives MCP-capable agents a focused tool for cases where guessing is the wrong move. The agent can pause, show the question and relevant context, wait for your answer, then continue the same workflow.
 
 <!-- TOC depthfrom:2 depthto:2 -->
 
@@ -63,9 +61,7 @@ And Codex (or your agent of choice) will do just that, because it now has a well
 
 ### Recommended: No installation, use uvx
 
-`uvx` is the recommended way to run Ask Human from an MCP client. It does
-not require a prior install: it downloads the `ask-human` package on first
-invocation, caches it, and runs it in an isolated environment.
+`uvx` is the recommended way to run Ask Human from an MCP client. It does not require a prior install: it downloads the `ask-human` package on first invocation, caches it, and runs it in an isolated environment.
 
 Any MCP client that can launch a stdio command can use it that way. Example MCP configuration shape:
 
@@ -196,8 +192,7 @@ Add this to your Cursor MCP config:
 }
 ```
 
-The included `mcp-server-config.json` has copyable examples for installed,
-`uvx`, and local-dev usage.
+The included `mcp-server-config.json` has copyable examples for installed, `uvx`, and local-dev usage.
 
 ## AGENTS.md instructions
 
@@ -288,11 +283,7 @@ to the MCP config args list.
 
 When you receive an agent prompt, you can respond with text, a photo, another media/file attachment (up to 20 MB), location, etc. Voice auto-transcription is not supported yet. A capable agent will be able to inspect supported files/media. Files are saved to a temporary directory; see [Telegram file download directory](#telegram-file-download-directory).
 
-Telegram prompts render common agent Markdown, such as bold, italic, inline
-code, fenced code blocks, links, headings, quotes, and lists, through
-Telegram-supported HTML. The prompt metadata remains in an expandable Telegram
-quote block. If Telegram rejects the formatting, the same prompt is retried as
-plain text so the message is still delivered.
+Telegram prompts render common agent Markdown, such as bold, italic, inline code, fenced code blocks, links, headings, quotes, and lists, through Telegram-supported HTML. The prompt metadata remains in an expandable Telegram quote block. If Telegram rejects the formatting, the same prompt is retried as plain text so the message is still delivered.
 
 <details>
 <summary>How to create a Telegram bot and obtain chat ID</summary>
@@ -310,22 +301,19 @@ plain text so the message is still delivered.
 6. Find `message.chat.id` in the JSON response. That is the `<chat_id>`.
 7. Keep the bot token secret. Anyone with the token can control the bot.
 
-For a group chat, add the bot to the group, send a message in the group, then
-call `getUpdates` and use the group's `chat.id`.
+For a group chat, add the bot to the group, send a message in the group, then call `getUpdates` and use the group's `chat.id`.
 
 </details>
 
 See [Icons for Telegram bot](https://github.com/alexchexes/ask-human/tree/main/src/ask_human/assets/telegram).
 
-**Important:**
-If you run agents on different machines or inside different VMs, you must use a **different Telegram bot token for each machine/environment**. That limitation is due to how Telegram's `getUpdates` mechanism works. Using the same bot for different environments may be buggy and unreliable.
+**Important:** If you run agents on different machines or inside different VMs, you must use a **different Telegram bot token for each machine/environment**. That limitation is due to how Telegram's `getUpdates` mechanism works. Using the same bot for different environments may be buggy and unreliable.
 
 <details>
 
 <summary>How Telegram broker works</summary>
 
-Telegram delivery uses a local auto-started broker process instead of letting
-each agent session poll `getUpdates` independently.
+Telegram delivery uses a local auto-started broker process instead of letting each agent session poll `getUpdates` independently.
 
 Current behavior:
 
@@ -340,16 +328,14 @@ This makes same-machine concurrent Telegram prompts safe.
 Current limitation:
 
 - cross-machine or shared-server coordination is not implemented yet
-- if two different machines use the same bot target at the same time, replies
-  can still be consumed by the wrong machine
+- if two different machines use the same bot target at the same time, replies can still be consumed by the wrong machine
 
 Telegram prompt metadata includes:
 
 - `Prompt ID: ...`
 - `Broker: <label> [<id>]`
 
-That helps identify which local broker instance sent a prompt and makes some
-cross-machine mix-ups easier to diagnose.
+That helps identify which local broker instance sent a prompt and makes some cross-machine mix-ups easier to diagnose.
 
 Advanced/manual broker mode is mainly for debugging and future remote deployment:
 
@@ -374,42 +360,27 @@ The next Telegram prompt auto-starts a fresh local broker if one is needed.
 In `both` mode:
 
 - macOS and Linux try to close the local dialog when the Telegram reply arrives first
-- Windows keeps the current Tk dialog behavior; if Telegram wins first, the local
-  dialog may stay open and any later answer there will be ignored
+- Windows keeps the current Tk dialog behavior; if Telegram wins first, the local dialog may stay open and any later answer there will be ignored
 
 Telegram reply behavior:
 
 - use Telegram's Reply feature on the bot's question message
-- if you select part of the bot message before replying, that selected quote is
-  included in the agent-facing response
-- long text replies that Telegram splits into multiple reply messages are
-  recombined when the split parts still reply to the same bot message
+- if you select part of the bot message before replying, that selected quote is included in the agent-facing response
+- long text replies that Telegram splits into multiple reply messages are recombined when the split parts still reply to the same bot message
 - albums/media groups are combined into one agent-facing response
-- short bursts of ungrouped file/media replies are combined too, so multiple
-  screenshots or documents can be sent even when Telegram's `Group items` option
-  is disabled
-- for many or delayed attachments, reply with `/files_start`, send the items as
-  normal Telegram messages, then send `/files_finish`; use `/files_cancel` to
-  discard the collected items and keep the prompt waiting
-- if a local broker is actively waiting and you send a non-reply message, it sends
-  a short warning that the message is ignored and you must use Reply;
-- if you reply to a message that is not the currently active question, it sends
-  a warning instead of silently consuming the reply
-- if you reply to one of this broker's own older inactive prompt messages, it sends
-  a short warning that the old question is no longer active
+- short bursts of ungrouped file/media replies are combined too, so multiple screenshots or documents can be sent even when Telegram's `Group items` option is disabled
+- for many or delayed attachments, reply with `/files_start`, send the items as normal Telegram messages, then send `/files_finish`; use `/files_cancel` to discard the collected items and keep the prompt waiting
+- if a local broker is actively waiting and you send a non-reply message, it sends a short warning that the message is ignored and you must use Reply;
+- if you reply to a message that is not the currently active question, it sends a warning instead of silently consuming the reply
+- if you reply to one of this broker's own older inactive prompt messages, it sends a short warning that the old question is no longer active
 - successful replies get a `Received [Prompt ID]` acknowledgement
-- supported replies include text, files/media messages up to 20 MB each,
-  location, venue, and contact
+- supported replies include text, files/media messages up to 20 MB each, location, venue, and contact
 - files are downloaded locally and returned to the agent as local paths
-- if one item in an attachment group is unsupported or too large, the whole group
-  is rejected and the prompt keeps waiting for a valid reply
-- replies that appear intended for another broker instance trigger a warning
-  instead of being silently misrouted
-- Telegram delivery failures for the initial question or retry/warning messages
-  are returned to the agent as prompt errors
+- if one item in an attachment group is unsupported or too large, the whole group is rejected and the prompt keeps waiting for a valid reply
+- replies that appear intended for another broker instance trigger a warning instead of being silently misrouted
+- Telegram delivery failures for the initial question or retry/warning messages are returned to the agent as prompt errors
 
-Optional command menu: in `@BotFather`, run `/setcommands`, pick your bot, and
-send:
+Optional command menu: in `@BotFather`, run `/setcommands`, pick your bot, and send:
 
 ```text
 files_start - Start collecting many attachments
@@ -520,9 +491,7 @@ The internal timeout that affects OS dialog and Telegram prompts. Defaults to 12
 ask-human --transport stdio --timeout-seconds 1200
 ```
 
-MCP clients may enforce their own tool-call timeout. If your client supports a
-tool timeout setting, set it to at least the same value as `--timeout-seconds`;
-otherwise the client may stop waiting before Ask Human does.
+MCP clients may enforce their own tool-call timeout. If your client supports a tool timeout setting, set it to at least the same value as `--timeout-seconds`; otherwise the client may stop waiting before Ask Human does.
 
 #### Response channels
 
@@ -571,9 +540,7 @@ Parameters:
 - `question` (string, required): specific question or request
 - `context` (string, optional): background shown before the question
 
-`question` and `context` may contain up to 8000 characters combined. Long Telegram
-prompts are split across messages automatically; Windows dialogs wrap long lines
-best-effort but are not scrollable yet.
+`question` and `context` may contain up to 8000 characters combined. Long Telegram prompts are split across messages automatically; Windows dialogs wrap long lines best-effort but are not scrollable yet.
 
 Returns one of:
 
@@ -609,9 +576,7 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 ```
 
-When changing Telegram broker/client code during local development, stop any
-running local Telegram broker before retesting. Otherwise the detached broker may
-keep running old code from before your edit.
+When changing Telegram broker/client code during local development, stop any running local Telegram broker before retesting. Otherwise the detached broker may keep running old code from before your edit. See [How Telegram broker works](#how-telegram-broker-works) for the Windows stop command.
 
 Run checks:
 
