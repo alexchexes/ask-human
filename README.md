@@ -392,8 +392,7 @@ Telegram reply behavior:
   normal Telegram messages, then send `/files_finish`; use `/files_cancel` to
   discard the collected items and keep the prompt waiting
 - if a local broker is actively waiting and you send a non-reply message, it sends
-  a short warning that the message is ignored and you must use Reply; attachment
-  warnings also mention `/files_start`
+  a short warning that the message is ignored and you must use Reply;
 - if you reply to a message that is not the currently active question, it sends
   a warning instead of silently consuming the reply
 - if you reply to one of this broker's own older inactive prompt messages, it sends
