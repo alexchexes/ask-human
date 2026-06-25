@@ -197,6 +197,7 @@ def test_telegram_client_sends_prompt_with_html_parse_mode(monkeypatch, tmp_path
         TelegramConfig("123456:ABCDEF", "-1009876543210"),
         tmp_path,
     )
+    client.ATTACHMENT_REPLY_DEBOUNCE_SECONDS = 0.01
     sent_messages = []
 
     async def fake_bot_api_request(method, payload, timeout):
@@ -282,7 +283,7 @@ def test_telegram_client_resolves_reply_to_sent_message(monkeypatch, tmp_path):
                 return {"message_id": 101}
             return {"message_id": 301}
         if method == "getUpdates":
-            return updates.pop(0)
+            return updates.pop(0) if updates else []
         raise AssertionError(f"Unexpected method: {method}")
 
     monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
@@ -327,7 +328,7 @@ def test_telegram_client_includes_selected_quote_context(monkeypatch, tmp_path):
                 return {"message_id": 101}
             return {"message_id": 301}
         if method == "getUpdates":
-            return updates.pop(0)
+            return updates.pop(0) if updates else []
         raise AssertionError(f"Unexpected method: {method}")
 
     monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
@@ -374,7 +375,7 @@ def test_telegram_client_accepts_reply_to_any_prompt_chunk(monkeypatch, tmp_path
                 return {"message_id": next(prompt_message_ids)}
             return {"message_id": 301}
         if method == "getUpdates":
-            return updates.pop(0)
+            return updates.pop(0) if updates else []
         raise AssertionError(f"Unexpected method: {method}")
 
     monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
@@ -441,7 +442,7 @@ def test_telegram_client_combines_split_text_replies_in_one_update_page(
                 return {"message_id": 101}
             return {"message_id": 301}
         if method == "getUpdates":
-            return updates.pop(0)
+            return updates.pop(0) if updates else []
         raise AssertionError(f"Unexpected method: {method}")
 
     monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
@@ -497,7 +498,7 @@ def test_telegram_client_separates_split_text_replies_without_boundary_whitespac
                 return {"message_id": 101}
             return {"message_id": 301}
         if method == "getUpdates":
-            return updates.pop(0)
+            return updates.pop(0) if updates else []
         raise AssertionError(f"Unexpected method: {method}")
 
     monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
@@ -550,7 +551,7 @@ def test_telegram_client_combines_split_text_replies_across_update_pages(
                 return {"message_id": 101}
             return {"message_id": 301}
         if method == "getUpdates":
-            return updates.pop(0)
+            return updates.pop(0) if updates else []
         raise AssertionError(f"Unexpected method: {method}")
 
     monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
@@ -589,7 +590,7 @@ def test_telegram_client_confirms_consumed_updates_before_stopping(monkeypatch, 
             return {"message_id": 301}
         if method == "getUpdates":
             get_updates_payloads.append(payload.copy())
-            return updates.pop(0)
+            return updates.pop(0) if updates else []
         raise AssertionError(f"Unexpected method: {method}")
 
     monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
@@ -651,7 +652,7 @@ def test_telegram_client_ignores_backlog_updates_before_prompt_message(monkeypat
                 return {"message_id": 101}
             return {"message_id": 301}
         if method == "getUpdates":
-            return updates.pop(0)
+            return updates.pop(0) if updates else []
         raise AssertionError(f"Unexpected method: {method}")
 
     monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
@@ -727,7 +728,11 @@ def test_telegram_client_rejects_too_large_file_and_waits_for_valid_text(monkeyp
                 return {"message_id": 101}
             return {"message_id": 302}
         if method == "getUpdates":
-            return updates.pop(0)
+            if len(updates) == 2 and not any(
+                "File too large for [QTEST-1234]" in message["text"] for message in sent_messages
+            ):
+                return []
+            return updates.pop(0) if updates else []
         raise AssertionError(f"Unexpected method: {method}")
 
     monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
@@ -771,7 +776,7 @@ def test_telegram_client_formats_file_reply_as_user_attachment(monkeypatch, tmp_
                 return {"message_id": 101}
             return {"message_id": 302}
         if method == "getUpdates":
-            return updates.pop(0)
+            return updates.pop(0) if updates else []
         if method == "getFile":
             return {"file_path": "documents/report.txt", "file_size": 1024}
         raise AssertionError(f"Unexpected method: {method}")
@@ -791,6 +796,563 @@ def test_telegram_client_formats_file_reply_as_user_attachment(monkeypatch, tmp_
         "Caption: please inspect this\n"
         f"User attached file: {expected_path}"
     )
+
+
+def test_telegram_client_combines_media_group_photos(monkeypatch, tmp_path):
+    """Treat Telegram albums as one reply instead of rejecting each item."""
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    client.ATTACHMENT_REPLY_DEBOUNCE_SECONDS = 0.01
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 210,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "media_group_id": "album-1",
+                    "photo": [{"file_id": "photo-1", "file_size": 1024}],
+                },
+            },
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 211,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "media_group_id": "album-1",
+                    "caption": "second caption",
+                    "photo": [{"file_id": "photo-2", "file_size": 2048}],
+                },
+            },
+        ],
+        [],
+    ]
+    sent_messages = []
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            sent_messages.append(payload)
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 302}
+        if method == "getUpdates":
+            return updates.pop(0) if updates else []
+        if method == "getFile":
+            return {"file_path": f"photos/{payload['file_id']}.jpg", "file_size": 1024}
+        raise AssertionError(f"Unexpected method: {method}")
+
+    def fake_download_file_sync(telegram_file_path, target_path):
+        target_path.write_text("downloaded content", encoding="utf-8")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+    monkeypatch.setattr(client, "_download_telegram_file_sync", fake_download_file_sync)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    expected_path_1 = (tmp_path / "QTEST-1234" / "photo-1.jpg").resolve()
+    expected_path_2 = (tmp_path / "QTEST-1234" / "photo-2.jpg").resolve()
+    assert result == (
+        "[telegram media group reply]\n\n"
+        "Items: 2\n\n"
+        "Item 1/2:\n"
+        "[telegram photo reply]\n"
+        f"User attached file: {expected_path_1}\n\n"
+        "Item 2/2:\n"
+        "[telegram photo reply]\n"
+        "Caption: second caption\n"
+        f"User attached file: {expected_path_2}"
+    )
+    assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
+    assert sent_messages[-1]["reply_to_message_id"] == 211
+
+
+def test_telegram_client_combines_ungrouped_attachment_burst(monkeypatch, tmp_path):
+    """Collect a short burst of ungrouped attachments before resolving."""
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    client.ATTACHMENT_REPLY_DEBOUNCE_SECONDS = 0.01
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 210,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "document": {
+                        "file_id": "file-1",
+                        "file_size": 1024,
+                        "file_name": "report.txt",
+                    },
+                },
+            },
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 211,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "caption": "same visible filename",
+                    "document": {
+                        "file_id": "file-2",
+                        "file_size": 1024,
+                        "file_name": "report.txt",
+                    },
+                },
+            },
+        ],
+        [],
+    ]
+    sent_messages = []
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            sent_messages.append(payload)
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 302}
+        if method == "getUpdates":
+            return updates.pop(0) if updates else []
+        if method == "getFile":
+            return {"file_path": f"documents/{payload['file_id']}.txt", "file_size": 1024}
+        raise AssertionError(f"Unexpected method: {method}")
+
+    def fake_download_file_sync(telegram_file_path, target_path):
+        target_path.write_text("downloaded content", encoding="utf-8")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+    monkeypatch.setattr(client, "_download_telegram_file_sync", fake_download_file_sync)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    expected_path_1 = (tmp_path / "QTEST-1234" / "report.txt").resolve()
+    expected_path_2 = (tmp_path / "QTEST-1234" / "report-2.txt").resolve()
+    assert result == (
+        "[telegram attachment group reply]\n\n"
+        "Items: 2\n\n"
+        "Item 1/2:\n"
+        "[telegram document reply]\n"
+        f"User attached file: {expected_path_1}\n\n"
+        "Item 2/2:\n"
+        "[telegram document reply]\n"
+        "Caption: same visible filename\n"
+        f"User attached file: {expected_path_2}\n"
+        "Original file name: report.txt"
+    )
+    assert [payload["text"] for payload in sent_messages] == [
+        "Prompt text",
+        "✅ Received [QTEST-1234]",
+    ]
+
+
+def test_telegram_client_rejects_bad_attachment_group_once(monkeypatch, tmp_path):
+    """Reject the whole collected group once if any item cannot be used."""
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    client.ATTACHMENT_REPLY_DEBOUNCE_SECONDS = 0.01
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 210,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "media_group_id": "album-1",
+                    "document": {
+                        "file_id": "file-ok",
+                        "file_size": 1024,
+                        "file_name": "small.txt",
+                    },
+                },
+            },
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 211,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "media_group_id": "album-1",
+                    "document": {
+                        "file_id": "file-too-big",
+                        "file_size": 25 * 1024 * 1024,
+                        "file_name": "huge.zip",
+                    },
+                },
+            },
+        ],
+        [
+            {
+                "update_id": 3,
+                "message": {
+                    "message_id": 212,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": "fallback answer",
+                },
+            }
+        ],
+        [],
+    ]
+    sent_messages = []
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            sent_messages.append(payload)
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 302}
+        if method == "getUpdates":
+            if len(updates) == 2 and not any(
+                "Unsupported attachment group" in message["text"] for message in sent_messages
+            ):
+                return []
+            return updates.pop(0) if updates else []
+        if method == "getFile":
+            return {"file_path": "documents/small.txt", "file_size": 1024}
+        raise AssertionError(f"Unexpected method: {method}")
+
+    def fake_download_file_sync(telegram_file_path, target_path):
+        target_path.write_text("downloaded content", encoding="utf-8")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+    monkeypatch.setattr(client, "_download_telegram_file_sync", fake_download_file_sync)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    assert result == "fallback answer"
+    group_warnings = [
+        payload["text"]
+        for payload in sent_messages
+        if "Unsupported attachment group" in payload["text"]
+    ]
+    assert len(group_warnings) == 1
+    assert "File too large" in group_warnings[0]
+    assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
+
+
+def test_telegram_client_parses_file_collection_commands_with_bot_username():
+    """Accept Telegram's group-chat /command@BotUsername form."""
+    parse_command = TelegramPromptClient._parse_series_command
+
+    assert parse_command("/files_start") == "begin"
+    assert parse_command("/files_start@AskHumanBot") == "begin"
+    assert parse_command("/files_finish@AskHumanBot") == "commit"
+    assert parse_command("/files_cancel@AskHumanBot") == "cancel"
+    assert parse_command("/files_start now") is None
+    assert parse_command("/files_start\tsoon") is None
+    assert parse_command("/files_start@") is None
+    assert parse_command("/files_start@bad-name") is None
+
+
+def test_telegram_client_collects_explicit_attachment_series(monkeypatch, tmp_path):
+    """Let users explicitly collect many/delayed Telegram items before resolving."""
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 210,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": "/files_start",
+                },
+            }
+        ],
+        [
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 211,
+                    "chat": {"id": -1009876543210},
+                    "document": {
+                        "file_id": "file-1",
+                        "file_size": 1024,
+                        "file_name": "report.txt",
+                    },
+                },
+            }
+        ],
+        [
+            {
+                "update_id": 3,
+                "message": {
+                    "message_id": 212,
+                    "chat": {"id": -1009876543210},
+                    "photo": [{"file_id": "photo-1", "file_size": 2048}],
+                },
+            }
+        ],
+        [
+            {
+                "update_id": 4,
+                "message": {
+                    "message_id": 213,
+                    "chat": {"id": -1009876543210},
+                    "text": "extra note",
+                },
+            }
+        ],
+        [
+            {
+                "update_id": 5,
+                "message": {
+                    "message_id": 214,
+                    "chat": {"id": -1009876543210},
+                    "text": "/files_finish",
+                },
+            }
+        ],
+        [],
+    ]
+    sent_messages = []
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            sent_messages.append(payload)
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 300 + len(sent_messages)}
+        if method == "getUpdates":
+            return updates.pop(0) if updates else []
+        if method == "getFile":
+            file_id = payload["file_id"]
+            if file_id == "photo-1":
+                return {"file_path": "photos/photo-1.jpg", "file_size": 2048}
+            return {"file_path": f"documents/{file_id}.txt", "file_size": 1024}
+        raise AssertionError(f"Unexpected method: {method}")
+
+    def fake_download_file_sync(telegram_file_path, target_path):
+        target_path.write_text("downloaded content", encoding="utf-8")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+    monkeypatch.setattr(client, "_download_telegram_file_sync", fake_download_file_sync)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    expected_file_path = (tmp_path / "QTEST-1234" / "report.txt").resolve()
+    expected_photo_path = (tmp_path / "QTEST-1234" / "photo-1.jpg").resolve()
+    assert result == (
+        "[telegram attachment group reply]\n\n"
+        "Items: 3\n\n"
+        "Item 1/3:\n"
+        "[telegram document reply]\n"
+        f"User attached file: {expected_file_path}\n\n"
+        "Item 2/3:\n"
+        "[telegram photo reply]\n"
+        f"User attached file: {expected_photo_path}\n\n"
+        "Item 3/3:\n"
+        "extra note"
+    )
+    assert [payload["text"] for payload in sent_messages] == [
+        "Prompt text",
+        "✅ File collection started for [QTEST-1234]. Send attachments or text, "
+        "then send /files_finish to finalize and send. Send /files_cancel to discard this collection.",
+        "✅ Received [QTEST-1234]",
+    ]
+    assert sent_messages[-1]["reply_to_message_id"] == 214
+
+
+def test_telegram_client_cancels_explicit_attachment_series(monkeypatch, tmp_path):
+    """Discard a series without resolving the original prompt."""
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 210,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": "/files_start",
+                },
+            }
+        ],
+        [
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 211,
+                    "chat": {"id": -1009876543210},
+                    "document": {
+                        "file_id": "file-1",
+                        "file_size": 1024,
+                        "file_name": "discard.txt",
+                    },
+                },
+            }
+        ],
+        [
+            {
+                "update_id": 3,
+                "message": {
+                    "message_id": 212,
+                    "chat": {"id": -1009876543210},
+                    "text": "/files_cancel",
+                },
+            }
+        ],
+        [
+            {
+                "update_id": 4,
+                "message": {
+                    "message_id": 213,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": "fallback answer",
+                },
+            }
+        ],
+        [],
+    ]
+    sent_messages = []
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            sent_messages.append(payload)
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 300 + len(sent_messages)}
+        if method == "getUpdates":
+            return updates.pop(0) if updates else []
+        if method == "getFile":
+            raise AssertionError("Cancelled series should not download files")
+        raise AssertionError(f"Unexpected method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    assert result == "fallback answer"
+    assert [payload["text"] for payload in sent_messages] == [
+        "Prompt text",
+        "✅ File collection started for [QTEST-1234]. Send attachments or text, "
+        "then send /files_finish to finalize and send. Send /files_cancel to discard this collection.",
+        "✅ File collection [QTEST-1234] cancelled. The prompt is still waiting; "
+        "<b>Reply</b> ↪ normally or start a new file collection. Previous files are discarded 🗑️.",
+        "✅ Received [QTEST-1234]",
+    ]
+
+
+def test_telegram_client_reply_to_other_prompt_escapes_series(monkeypatch, tmp_path):
+    """A reply to another active prompt must not be captured by the active series."""
+
+    async def run_two_prompt_flow():
+        client = TelegramPromptClient(
+            TelegramConfig("123456:ABCDEF", "-1009876543210"),
+            tmp_path,
+        )
+        prompt_message_ids = {"Prompt one": 101, "Prompt two": 102}
+        prompts_sent = 0
+        sent_messages = []
+        updates = [
+            [
+                {
+                    "update_id": 1,
+                    "message": {
+                        "message_id": 210,
+                        "chat": {"id": -1009876543210},
+                        "reply_to_message": {"message_id": 101},
+                        "text": "/files_start",
+                    },
+                }
+            ],
+            [
+                {
+                    "update_id": 2,
+                    "message": {
+                        "message_id": 211,
+                        "chat": {"id": -1009876543210},
+                        "document": {
+                            "file_id": "file-1",
+                            "file_size": 1024,
+                            "file_name": "series.txt",
+                        },
+                    },
+                }
+            ],
+            [
+                {
+                    "update_id": 3,
+                    "message": {
+                        "message_id": 212,
+                        "chat": {"id": -1009876543210},
+                        "reply_to_message": {"message_id": 102},
+                        "text": "answer to second prompt",
+                    },
+                }
+            ],
+            [
+                {
+                    "update_id": 4,
+                    "message": {
+                        "message_id": 213,
+                        "chat": {"id": -1009876543210},
+                        "text": "/files_finish",
+                    },
+                }
+            ],
+            [],
+        ]
+
+        async def fake_bot_api_request(method, payload, timeout):
+            nonlocal prompts_sent
+            if method == "sendMessage":
+                sent_messages.append(payload)
+                if "parse_mode" in payload:
+                    prompts_sent += 1
+                    return {"message_id": prompt_message_ids[payload["text"]]}
+                return {"message_id": 300 + len(sent_messages)}
+            if method == "getUpdates":
+                if prompts_sent < 2:
+                    return []
+                return updates.pop(0) if updates else []
+            if method == "getFile":
+                return {"file_path": "documents/series.txt", "file_size": 1024}
+            raise AssertionError(f"Unexpected method: {method}")
+
+        def fake_download_file_sync(telegram_file_path, target_path):
+            target_path.write_text("downloaded content", encoding="utf-8")
+
+        monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+        monkeypatch.setattr(client, "_download_telegram_file_sync", fake_download_file_sync)
+
+        first_prompt = asyncio.create_task(client.ask_question("Prompt one", 5, "QFIRST-1234"))
+        second_prompt = asyncio.create_task(client.ask_question("Prompt two", 5, "QSECOND-1234"))
+
+        first_result, second_result = await asyncio.gather(first_prompt, second_prompt)
+        return first_result, second_result, sent_messages
+
+    first_result, second_result, sent_messages = asyncio.run(run_two_prompt_flow())
+
+    expected_path = (tmp_path / "QFIRST-1234" / "series.txt").resolve()
+    assert first_result is not None
+    assert first_result == ("[telegram document reply]\n" f"User attached file: {expected_path}")
+    assert second_result == "answer to second prompt"
+    assert "answer to second prompt" not in first_result
+    assert [payload["text"] for payload in sent_messages] == [
+        "Prompt one",
+        "Prompt two",
+        "✅ File collection started for [QFIRST-1234]. Send attachments or text, "
+        "then send /files_finish to finalize and send. Send /files_cancel to discard this collection.",
+        "✅ Received [QSECOND-1234]",
+        "✅ Received [QFIRST-1234]",
+    ]
 
 
 def test_telegram_client_keeps_original_file_name_when_local_name_changes(monkeypatch, tmp_path):
@@ -824,7 +1386,7 @@ def test_telegram_client_keeps_original_file_name_when_local_name_changes(monkey
                 return {"message_id": 101}
             return {"message_id": 302}
         if method == "getUpdates":
-            return updates.pop(0)
+            return updates.pop(0) if updates else []
         if method == "getFile":
             return {"file_path": "documents/fallback.txt", "file_size": 1024}
         raise AssertionError(f"Unexpected method: {method}")
@@ -872,11 +1434,11 @@ def test_reply_rejection_status_send_failure_fails_prompt(monkeypatch, tmp_path)
 
     async def fake_bot_api_request(method, payload, timeout):
         if method == "sendMessage":
-            if "parse_mode" in payload:
+            if payload["text"] == "Prompt text" and "parse_mode" in payload:
                 return {"message_id": 101}
             raise TelegramPromptError("status send failed")
         if method == "getUpdates":
-            return updates.pop(0)
+            return updates.pop(0) if updates else []
         raise AssertionError(f"Unexpected method: {method}")
 
     monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
@@ -934,7 +1496,7 @@ def test_telegram_client_warns_for_each_non_reply_message(monkeypatch, tmp_path)
                 return {"message_id": 101}
             return {"message_id": 302 + len(sent_messages)}
         if method == "getUpdates":
-            return updates.pop(0)
+            return updates.pop(0) if updates else []
         raise AssertionError(f"Unexpected method: {method}")
 
     monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
@@ -945,6 +1507,63 @@ def test_telegram_client_warns_for_each_non_reply_message(monkeypatch, tmp_path)
     assert [payload["text"] for payload in sent_messages].count(
         TelegramPromptClient.NON_REPLY_HINT_TEXT
     ) == 2
+    assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
+
+
+def test_telegram_client_adds_series_hint_for_non_reply_attachment(monkeypatch, tmp_path):
+    """Mention explicit series only when the ignored non-reply message has an attachment."""
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 210,
+                    "chat": {"id": -1009876543210},
+                    "document": {
+                        "file_id": "file-1",
+                        "file_size": 1024,
+                        "file_name": "report.txt",
+                    },
+                },
+            }
+        ],
+        [
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 211,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": "proper reply",
+                },
+            }
+        ],
+        [],
+    ]
+    sent_messages = []
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            sent_messages.append(payload)
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 302 + len(sent_messages)}
+        if method == "getUpdates":
+            return updates.pop(0) if updates else []
+        raise AssertionError(f"Unexpected method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    assert result == "proper reply"
+    assert (
+        TelegramPromptClient.NON_REPLY_HINT_TEXT + TelegramPromptClient.SERIES_ATTACHMENT_HINT_TEXT
+    ) in [payload["text"] for payload in sent_messages]
     assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
 
 
@@ -969,11 +1588,11 @@ def test_non_reply_warning_send_failure_fails_prompt(monkeypatch, tmp_path):
 
     async def fake_bot_api_request(method, payload, timeout):
         if method == "sendMessage":
-            if "parse_mode" in payload:
+            if payload["text"] == "Prompt text" and "parse_mode" in payload:
                 return {"message_id": 101}
             raise TelegramPromptError("status send failed")
         if method == "getUpdates":
-            return updates.pop(0)
+            return updates.pop(0) if updates else []
         raise AssertionError(f"Unexpected method: {method}")
 
     monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
@@ -1032,7 +1651,7 @@ def test_telegram_client_warns_for_stale_local_reply(monkeypatch, tmp_path):
                 return {"message_id": 101}
             return {"message_id": 400 + len(sent_messages)}
         if method == "getUpdates":
-            return updates.pop(0)
+            return updates.pop(0) if updates else []
         raise AssertionError(f"Unexpected method: {method}")
 
     monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
@@ -1042,9 +1661,81 @@ def test_telegram_client_warns_for_stale_local_reply(monkeypatch, tmp_path):
     assert result == "answer to current prompt"
     assert any(
         payload["text"]
-        == "⚠️ Message is ignored. Prompt [QOLD-0001] is no longer active. Ask the agent to send a new question."
+        == (
+            "⚠️ Message is ignored. Prompt [QOLD-0001] is no longer active. Ask the "
+            "agent to send a new question."
+        )
         for payload in sent_messages
     )
+    assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
+
+
+def test_telegram_client_adds_series_hint_for_stale_attachment_reply(monkeypatch, tmp_path):
+    """Mention explicit series only when the stale reply itself has an attachment."""
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+        broker_identity=TelegramBrokerIdentity("abcd1234", "Alex Laptop"),
+    )
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 220,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {
+                        "message_id": 100,
+                        "text": (
+                            "<blockquote expandable>\n"
+                            "Answers support text or files up to 20 MB.\n"
+                            "Prompt ID: QOLD-0001\n"
+                            "Broker: Alex Laptop [abcd1234]\n"
+                            "</blockquote>"
+                        ),
+                    },
+                    "document": {
+                        "file_id": "file-1",
+                        "file_size": 1024,
+                        "file_name": "report.txt",
+                    },
+                },
+            }
+        ],
+        [
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 221,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": "answer to current prompt",
+                },
+            }
+        ],
+        [],
+    ]
+    sent_messages = []
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            sent_messages.append(payload)
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 400 + len(sent_messages)}
+        if method == "getUpdates":
+            return updates.pop(0) if updates else []
+        raise AssertionError(f"Unexpected method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    assert result == "answer to current prompt"
+    assert (
+        "⚠️ Message is ignored. Prompt [QOLD-0001] is no longer active. Ask the "
+        "agent to send a new question." + TelegramPromptClient.SERIES_ATTACHMENT_HINT_TEXT
+    ) in [payload["text"] for payload in sent_messages]
     assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
 
 
@@ -1098,7 +1789,7 @@ def test_telegram_client_warns_for_foreign_broker_reply(monkeypatch, tmp_path):
                 return {"message_id": 101}
             return {"message_id": 600 + len(sent_messages)}
         if method == "getUpdates":
-            return updates.pop(0)
+            return updates.pop(0) if updates else []
         raise AssertionError(f"Unexpected method: {method}")
 
     monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
@@ -1157,7 +1848,7 @@ def test_unmatched_reply_without_prompt_text_gets_generic_warning(monkeypatch, t
                 return {"message_id": 101}
             return {"message_id": 500 + len(sent_messages)}
         if method == "getUpdates":
-            return updates.pop(0)
+            return updates.pop(0) if updates else []
         raise AssertionError(f"Unexpected method: {method}")
 
     monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)

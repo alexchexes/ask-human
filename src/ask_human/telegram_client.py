@@ -8,6 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import suppress
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, cast
 
@@ -24,18 +25,47 @@ from .telegram_models import (
 )
 
 
+@dataclass
+class _PendingAttachmentGroup:
+    """Collect file/media reply messages that belong to one agent answer."""
+
+    prompt_message_id: int
+    pending_prompt: TelegramPendingPrompt
+    group_key: tuple[int, str]
+    messages: list[dict[str, Any]] = field(default_factory=list)
+    selected_quote_text: Optional[str] = None
+    reply_to_message_id: Optional[int] = None
+    finalize_task: Optional[asyncio.Task[None]] = None
+    series_mode: bool = False
+
+
 class TelegramPromptClient:
     """Minimal long-polling Telegram client for prompt/response workflows."""
 
     ISSUE_URL = "https://github.com/alexchexes/ask-human/issues"
     PROMPT_PARSE_MODE = "HTML"
     SHUTDOWN_TIMEOUT_SECONDS = DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS + 15
+    ATTACHMENT_REPLY_DEBOUNCE_SECONDS = 1.0
     TEXT_REPLY_SPLIT_DEBOUNCE_SECONDS = 0.7
     TEXT_REPLY_SPLIT_MIN_LENGTH = 3500
-    NON_REPLY_HINT_TEXT = "⚠️ Message is ignored. Please use Reply on the bot's message."
+    ATTACHMENT_REPLY_KEYS = (
+        "document",
+        "video",
+        "audio",
+        "voice",
+        "animation",
+        "video_note",
+        "sticker",
+        "photo",
+    )
+    NON_REPLY_HINT_TEXT = "⚠️ Message is ignored. Use <b>Reply</b> ↪ on the bot's message."
+    SERIES_ATTACHMENT_HINT_TEXT = (
+        "\nℹ️ If you tried to send multiple attachments, reply with /files_start, "
+        "send the attachments, then send /files_finish."
+    )
     UNMATCHED_REPLY_HINT_TEXT = (
-        "⚠️ Message is ignored. It was not sent as a Reply to the currently active question. "
-        "Please use Reply on the latest Ask Human message."
+        "⚠️ Reply is ignored. It was not a Reply to the currently active question. "
+        "Use <b>Reply</b> ↪ on the <b>latest active message from agent</b>."
     )
     STALE_REPLY_HINT_TEMPLATE = (
         "⚠️ Message is ignored. {prompt_target} is no longer active. Ask the agent to send "
@@ -56,6 +86,8 @@ class TelegramPromptClient:
         self._lock = asyncio.Lock()
         self._next_update_offset: Optional[int] = None
         self._pending_by_message_id: dict[int, TelegramPendingPrompt] = {}
+        self._pending_attachment_groups: dict[tuple[int, str], _PendingAttachmentGroup] = {}
+        self._active_series_group: Optional[_PendingAttachmentGroup] = None
         self._poller_task: Optional[asyncio.Task[None]] = None
         self._latest_prompt_message_id: Optional[int] = None
 
@@ -93,8 +125,8 @@ class TelegramPromptClient:
         finally:
             finalize_task: Optional[asyncio.Task[None]] = None
             async with self._lock:
-                finalize_task = self._remove_pending_prompt_locked(pending_prompt)
-            if finalize_task is not None:
+                finalize_tasks = self._remove_pending_prompt_locked(pending_prompt)
+            for finalize_task in finalize_tasks:
                 finalize_task.cancel()
 
     async def shutdown(self, *, timeout: float = SHUTDOWN_TIMEOUT_SECONDS) -> None:
@@ -104,6 +136,12 @@ class TelegramPromptClient:
         async with self._lock:
             pending_prompts = self._unique_pending_prompts_locked()
             self._pending_by_message_id.clear()
+            for attachment_group in self._pending_attachment_groups.values():
+                if attachment_group.finalize_task is not None:
+                    finalize_tasks.append(attachment_group.finalize_task)
+                    attachment_group.finalize_task = None
+            self._pending_attachment_groups.clear()
+            self._active_series_group = None
             self._latest_prompt_message_id = None
             poller_task = self._poller_task
 
@@ -240,11 +278,23 @@ class TelegramPromptClient:
                     async with self._lock:
                         self._poller_task = None
                     return
+
+                # Real getUpdates long-polls, but tests and some failure modes can return
+                # empty pages immediately. Back off so debounce/finalizer tasks are not
+                # starved by a hot empty-poll loop.
+                await asyncio.sleep(0.05 if has_pending_prompts and not updates else 0)
         except Exception as exc:
             async with self._lock:
                 pending_items = self._unique_pending_prompts_locked()
                 self._pending_by_message_id.clear()
+                attachment_groups = list(self._pending_attachment_groups.values())
+                self._pending_attachment_groups.clear()
+                self._active_series_group = None
                 self._poller_task = None
+
+            for attachment_group in attachment_groups:
+                if attachment_group.finalize_task is not None:
+                    attachment_group.finalize_task.cancel()
 
             for pending_prompt in pending_items:
                 if pending_prompt.text_reply_finalize_task is not None:
@@ -256,23 +306,40 @@ class TelegramPromptClient:
 
     async def _handle_update(self, update: dict[str, Any]) -> None:
         """Process one Telegram update and resolve or reject matching replies."""
-        await self._maybe_hint_on_missing_reply(update)
         matched = await self._match_pending_prompt(update)
         if matched is None:
+            matched = await self._match_active_series(update)
+        if matched is None:
+            await self._maybe_hint_on_missing_reply(update)
             return
 
         prompt_message_id, pending_prompt, message = matched
         selected_quote_text = self._extract_selected_quote_text(message)
-        resolution = await self._build_reply_resolution(
-            message,
-            pending_prompt.prompt_id,
-            download_dir=pending_prompt.download_dir,
-        )
         user_message_id = message.get("message_id")
         reply_to_user_message_id = user_message_id if isinstance(user_message_id, int) else None
 
         response_text = message.get("text")
         if isinstance(response_text, str) and response_text.strip():
+            command = self._parse_series_command(response_text)
+            if command is not None:
+                await self._handle_series_command(
+                    command,
+                    prompt_message_id,
+                    pending_prompt,
+                    reply_to_message_id=reply_to_user_message_id,
+                )
+                return
+
+            if await self._has_pending_attachment_group(prompt_message_id, pending_prompt):
+                await self._handle_attachment_reply(
+                    prompt_message_id,
+                    pending_prompt,
+                    message,
+                    selected_quote_text=selected_quote_text,
+                    reply_to_message_id=reply_to_user_message_id,
+                )
+                return
+
             await self._handle_text_reply(
                 prompt_message_id,
                 pending_prompt,
@@ -281,6 +348,22 @@ class TelegramPromptClient:
                 reply_to_message_id=reply_to_user_message_id,
             )
             return
+
+        if self._is_file_or_media_reply(message):
+            await self._handle_attachment_reply(
+                prompt_message_id,
+                pending_prompt,
+                message,
+                selected_quote_text=selected_quote_text,
+                reply_to_message_id=reply_to_user_message_id,
+            )
+            return
+
+        resolution = await self._build_reply_resolution(
+            message,
+            pending_prompt.prompt_id,
+            download_dir=pending_prompt.download_dir,
+        )
 
         if isinstance(resolution, TelegramReplyRejection):
             await self._send_status_message(
@@ -332,6 +415,344 @@ class TelegramPromptClient:
 
         if should_resolve_now:
             await self._resolve_pending_text_reply(prompt_message_id, pending_prompt)
+
+    async def _has_pending_attachment_group(
+        self,
+        prompt_message_id: int,
+        pending_prompt: TelegramPendingPrompt,
+    ) -> bool:
+        """Check whether a file/media reply burst is already waiting to finalize."""
+        async with self._lock:
+            return any(
+                attachment_group.prompt_message_id == prompt_message_id
+                and attachment_group.pending_prompt is pending_prompt
+                for attachment_group in self._pending_attachment_groups.values()
+            )
+
+    async def _handle_attachment_reply(
+        self,
+        prompt_message_id: int,
+        pending_prompt: TelegramPendingPrompt,
+        message: dict[str, Any],
+        *,
+        selected_quote_text: Optional[str],
+        reply_to_message_id: Optional[int],
+    ) -> None:
+        """Collect file/media replies before resolving the prompt."""
+        group_key = self._build_attachment_group_key(prompt_message_id, message)
+        async with self._lock:
+            current_pending = self._pending_by_message_id.get(prompt_message_id)
+            if (
+                current_pending is None
+                or current_pending is not pending_prompt
+                or current_pending.future.done()
+            ):
+                return
+
+            attachment_group = self._active_series_group
+            if attachment_group is not None and (
+                attachment_group.prompt_message_id != prompt_message_id
+                or attachment_group.pending_prompt is not pending_prompt
+            ):
+                attachment_group = None
+
+            if attachment_group is not None:
+                group_key = attachment_group.group_key
+            else:
+                attachment_group = self._pending_attachment_groups.get(group_key)
+            if attachment_group is None and not self._is_file_or_media_reply(message):
+                attachment_group = self._find_attachment_group_for_prompt_locked(
+                    prompt_message_id,
+                    pending_prompt,
+                )
+                if attachment_group is not None:
+                    group_key = attachment_group.group_key
+
+            if attachment_group is None:
+                attachment_group = _PendingAttachmentGroup(
+                    prompt_message_id=prompt_message_id,
+                    pending_prompt=pending_prompt,
+                    group_key=group_key,
+                )
+                self._pending_attachment_groups[group_key] = attachment_group
+
+            attachment_group.messages.append(message)
+            if selected_quote_text is not None and attachment_group.selected_quote_text is None:
+                attachment_group.selected_quote_text = selected_quote_text
+            attachment_group.reply_to_message_id = reply_to_message_id
+            if not attachment_group.series_mode:
+                self._schedule_attachment_group_finalize_locked(attachment_group)
+
+    async def _handle_series_command(
+        self,
+        command: str,
+        prompt_message_id: int,
+        pending_prompt: TelegramPendingPrompt,
+        *,
+        reply_to_message_id: Optional[int],
+    ) -> None:
+        """Start, finish, or abort an explicit attachment series."""
+        if command == "begin":
+            await self._begin_series(prompt_message_id, pending_prompt, reply_to_message_id)
+            return
+
+        if command == "commit":
+            await self._commit_series(prompt_message_id, pending_prompt, reply_to_message_id)
+            return
+
+        if command == "cancel":
+            await self._cancel_series(prompt_message_id, pending_prompt, reply_to_message_id)
+            return
+
+    async def _begin_series(
+        self,
+        prompt_message_id: int,
+        pending_prompt: TelegramPendingPrompt,
+        reply_to_message_id: Optional[int],
+    ) -> None:
+        """Enter explicit multi-message attachment mode for one prompt."""
+        status_text: Optional[str] = None
+        async with self._lock:
+            current_pending = self._pending_by_message_id.get(prompt_message_id)
+            if (
+                current_pending is None
+                or current_pending is not pending_prompt
+                or current_pending.future.done()
+            ):
+                return
+
+            if self._active_series_group is not None:
+                active_prompt_id = self._active_series_group.pending_prompt.prompt_id
+                status_text = (
+                    f"⚠️ File collection is already active for [{active_prompt_id}]. "
+                    "Send /files_finish or /files_cancel before starting another collection."
+                )
+            else:
+                group_key = self._build_series_group_key(prompt_message_id)
+                attachment_group = self._pending_attachment_groups.get(group_key)
+                if attachment_group is None:
+                    attachment_group = _PendingAttachmentGroup(
+                        prompt_message_id=prompt_message_id,
+                        pending_prompt=pending_prompt,
+                        group_key=group_key,
+                        series_mode=True,
+                    )
+                    self._pending_attachment_groups[group_key] = attachment_group
+                else:
+                    attachment_group.series_mode = True
+                    if attachment_group.finalize_task is not None:
+                        attachment_group.finalize_task.cancel()
+                        attachment_group.finalize_task = None
+
+                self._active_series_group = attachment_group
+                status_text = (
+                    f"✅ File collection started for [{pending_prompt.prompt_id}]. "
+                    "Send attachments or text, then send /files_finish to finalize and send. "
+                    "Send /files_cancel to discard this collection."
+                )
+
+        if status_text is not None:
+            await self._send_status_message(
+                status_text,
+                reply_to_message_id=reply_to_message_id,
+            )
+
+    async def _commit_series(
+        self,
+        prompt_message_id: int,
+        pending_prompt: TelegramPendingPrompt,
+        reply_to_message_id: Optional[int],
+    ) -> None:
+        """Resolve the active explicit attachment series."""
+        status_text: Optional[str] = None
+        group_to_resolve: Optional[_PendingAttachmentGroup] = None
+        async with self._lock:
+            attachment_group = self._active_series_group
+            if (
+                attachment_group is None
+                or attachment_group.prompt_message_id != prompt_message_id
+                or attachment_group.pending_prompt is not pending_prompt
+            ):
+                status_text = (
+                    "⚠️ No active file collection for this prompt. Send /files_start first."
+                )
+            elif not attachment_group.messages:
+                status_text = (
+                    f"⚠️ File collection [{pending_prompt.prompt_id}] has no items yet. "
+                    "Send attachments or text, then send /files_finish to finalize or "
+                    "/files_cancel to discard this collection."
+                )
+            else:
+                attachment_group.reply_to_message_id = reply_to_message_id
+                group_to_resolve = attachment_group
+
+        if status_text is not None:
+            await self._send_status_message(
+                status_text,
+                reply_to_message_id=reply_to_message_id,
+            )
+            return
+
+        if group_to_resolve is not None:
+            await self._resolve_attachment_group(group_to_resolve.group_key, group_to_resolve)
+
+    async def _cancel_series(
+        self,
+        prompt_message_id: int,
+        pending_prompt: TelegramPendingPrompt,
+        reply_to_message_id: Optional[int],
+    ) -> None:
+        """Discard collected explicit series items and keep the prompt pending."""
+        status_text: Optional[str] = None
+        async with self._lock:
+            attachment_group = self._active_series_group
+            if (
+                attachment_group is None
+                or attachment_group.prompt_message_id != prompt_message_id
+                or attachment_group.pending_prompt is not pending_prompt
+            ):
+                status_text = (
+                    "⚠️ No active file collection for this prompt. Send /files_start first."
+                )
+            else:
+                if attachment_group.finalize_task is not None:
+                    attachment_group.finalize_task.cancel()
+                    attachment_group.finalize_task = None
+                self._pending_attachment_groups.pop(attachment_group.group_key, None)
+                self._active_series_group = None
+
+                status_text = (
+                    f"✅ File collection [{pending_prompt.prompt_id}] cancelled. "
+                    "The prompt is still waiting; <b>Reply</b> ↪ normally or start a new file collection. "
+                    "Previous files are discarded 🗑️."
+                )
+
+        if status_text is not None:
+            await self._send_status_message(
+                status_text,
+                reply_to_message_id=reply_to_message_id,
+            )
+
+    def _find_attachment_group_for_prompt_locked(
+        self,
+        prompt_message_id: int,
+        pending_prompt: TelegramPendingPrompt,
+    ) -> Optional[_PendingAttachmentGroup]:
+        """Find an active attachment group for a prompt."""
+        for attachment_group in self._pending_attachment_groups.values():
+            if (
+                attachment_group.prompt_message_id == prompt_message_id
+                and attachment_group.pending_prompt is pending_prompt
+            ):
+                return attachment_group
+        return None
+
+    def _schedule_attachment_group_finalize_locked(
+        self,
+        attachment_group: _PendingAttachmentGroup,
+    ) -> None:
+        """Restart the quiet period for one attachment group."""
+        if attachment_group.finalize_task is not None:
+            attachment_group.finalize_task.cancel()
+
+        finalize_task = asyncio.create_task(
+            self._finalize_attachment_group_after_debounce(
+                attachment_group.group_key,
+                attachment_group,
+            )
+        )
+        finalize_task.add_done_callback(self._consume_task_result)
+        attachment_group.finalize_task = finalize_task
+
+    async def _finalize_attachment_group_after_debounce(
+        self,
+        group_key: tuple[int, str],
+        attachment_group: _PendingAttachmentGroup,
+    ) -> None:
+        """Resolve a collected media group or ungrouped attachment burst."""
+        await asyncio.sleep(self.ATTACHMENT_REPLY_DEBOUNCE_SECONDS)
+        await self._resolve_attachment_group(group_key, attachment_group)
+
+    async def _resolve_attachment_group(
+        self,
+        group_key: tuple[int, str],
+        attachment_group: _PendingAttachmentGroup,
+    ) -> None:
+        """Turn collected attachment messages into one prompt response."""
+        async with self._lock:
+            current_group = self._pending_attachment_groups.get(group_key)
+            if current_group is not attachment_group:
+                return
+            attachment_group.finalize_task = None
+            messages = list(attachment_group.messages)
+            pending_prompt = attachment_group.pending_prompt
+            prompt_message_id = attachment_group.prompt_message_id
+            reply_to_message_id = attachment_group.reply_to_message_id
+            selected_quote_text = attachment_group.selected_quote_text
+
+        resolution = await self._build_attachment_group_resolution(
+            messages,
+            pending_prompt.prompt_id,
+            download_dir=pending_prompt.download_dir,
+        )
+
+        async with self._lock:
+            current_group = self._pending_attachment_groups.get(group_key)
+            if current_group is not attachment_group:
+                return
+            if len(attachment_group.messages) != len(messages):
+                self._schedule_attachment_group_finalize_locked(attachment_group)
+                return
+            self._pending_attachment_groups.pop(group_key, None)
+            if self._active_series_group is attachment_group:
+                self._active_series_group = None
+
+        if isinstance(resolution, TelegramReplyRejection):
+            try:
+                await self._send_status_message(
+                    resolution.user_message,
+                    reply_to_message_id=reply_to_message_id,
+                )
+            except TelegramPromptError as exc:
+                await self._fail_pending_prompt(
+                    prompt_message_id,
+                    pending_prompt,
+                    TelegramPromptError(f"Telegram polling failed: {exc}"),
+                )
+            return
+
+        await self._resolve_pending_prompt(
+            prompt_message_id,
+            pending_prompt,
+            self._format_agent_response(
+                resolution.agent_response,
+                selected_quote_text=selected_quote_text,
+            ),
+            reply_to_message_id=reply_to_message_id,
+        )
+
+    async def _fail_pending_prompt(
+        self,
+        prompt_message_id: int,
+        pending_prompt: TelegramPendingPrompt,
+        error: TelegramPromptError,
+    ) -> None:
+        """Fail a prompt from a background finalizer task."""
+        finalize_tasks: list[asyncio.Task[None]] = []
+        async with self._lock:
+            current_pending = self._pending_by_message_id.get(prompt_message_id)
+            if (
+                current_pending is not None
+                and current_pending is pending_prompt
+                and not current_pending.future.done()
+            ):
+                current_pending.future.set_exception(error)
+                finalize_tasks = self._remove_pending_prompt_locked(current_pending)
+
+        current_task = asyncio.current_task()
+        for finalize_task in finalize_tasks:
+            if finalize_task is not current_task:
+                finalize_task.cancel()
 
     def _schedule_text_reply_finalize_locked(
         self,
@@ -422,7 +843,7 @@ class TelegramPromptClient:
     ) -> None:
         """Resolve one pending prompt and acknowledge the consumed Telegram reply."""
         should_ack = False
-        finalize_task: Optional[asyncio.Task[None]] = None
+        finalize_tasks: list[asyncio.Task[None]] = []
         async with self._lock:
             current_pending = self._pending_by_message_id.get(prompt_message_id)
             if (
@@ -431,11 +852,13 @@ class TelegramPromptClient:
                 and not current_pending.future.done()
             ):
                 current_pending.future.set_result(agent_response)
-                finalize_task = self._remove_pending_prompt_locked(current_pending)
+                finalize_tasks = self._remove_pending_prompt_locked(current_pending)
                 should_ack = True
 
-        if finalize_task is not None and finalize_task is not asyncio.current_task():
-            finalize_task.cancel()
+        current_task = asyncio.current_task()
+        for finalize_task in finalize_tasks:
+            if finalize_task is not current_task:
+                finalize_task.cancel()
 
         if should_ack:
             await self._safe_send_status_message(
@@ -446,8 +869,9 @@ class TelegramPromptClient:
     def _remove_pending_prompt_locked(
         self,
         pending_prompt: TelegramPendingPrompt,
-    ) -> Optional[asyncio.Task[None]]:
+    ) -> list[asyncio.Task[None]]:
         """Remove every message-id alias for one pending prompt."""
+        finalize_tasks: list[asyncio.Task[None]] = []
         message_ids = [
             message_id
             for message_id, current_pending in self._pending_by_message_id.items()
@@ -456,13 +880,23 @@ class TelegramPromptClient:
         for message_id in message_ids:
             self._pending_by_message_id.pop(message_id, None)
 
-        finalize_task = pending_prompt.text_reply_finalize_task
+        if pending_prompt.text_reply_finalize_task is not None:
+            finalize_tasks.append(pending_prompt.text_reply_finalize_task)
         pending_prompt.text_reply_finalize_task = None
+        for group_key, attachment_group in list(self._pending_attachment_groups.items()):
+            if attachment_group.pending_prompt is pending_prompt:
+                if attachment_group.finalize_task is not None:
+                    finalize_tasks.append(attachment_group.finalize_task)
+                attachment_group.finalize_task = None
+                self._pending_attachment_groups.pop(group_key, None)
+                if self._active_series_group is attachment_group:
+                    self._active_series_group = None
+
         if not self._pending_by_message_id:
             self._latest_prompt_message_id = None
         elif self._latest_prompt_message_id in message_ids:
             self._latest_prompt_message_id = max(self._pending_by_message_id)
-        return finalize_task
+        return finalize_tasks
 
     def _unique_pending_prompts_locked(self) -> list[TelegramPendingPrompt]:
         """Return unique pending prompts from the message-id index."""
@@ -511,6 +945,47 @@ class TelegramPromptClient:
 
         return reply_message_id, pending_prompt, message
 
+    async def _match_active_series(
+        self,
+        update: dict[str, Any],
+    ) -> Optional[tuple[int, TelegramPendingPrompt, dict[str, Any]]]:
+        """Route non-reply messages into an explicit active series."""
+        message = update.get("message")
+        if not isinstance(message, dict):
+            return None
+
+        chat = message.get("chat")
+        if not isinstance(chat, dict) or str(chat.get("id")) != self.chat_id:
+            return None
+
+        if message.get("from", {}).get("is_bot"):
+            return None
+
+        # A reply to another prompt should escape series mode and be handled normally.
+        if isinstance(message.get("reply_to_message"), dict):
+            return None
+
+        if not self._is_user_reply_candidate(message):
+            return None
+
+        async with self._lock:
+            attachment_group = self._active_series_group
+            if attachment_group is None:
+                return None
+            current_pending = self._pending_by_message_id.get(attachment_group.prompt_message_id)
+            if (
+                current_pending is None
+                or current_pending is not attachment_group.pending_prompt
+                or current_pending.future.done()
+            ):
+                return None
+
+        return (
+            attachment_group.prompt_message_id,
+            attachment_group.pending_prompt,
+            message,
+        )
+
     async def _maybe_hint_on_missing_reply(self, update: dict[str, Any]) -> None:
         """Warn when the user sends a non-reply message while a local prompt is pending."""
         message = update.get("message")
@@ -539,7 +1014,7 @@ class TelegramPromptClient:
             return
 
         await self._send_status_message(
-            self.NON_REPLY_HINT_TEXT,
+            self._with_series_attachment_hint(self.NON_REPLY_HINT_TEXT, message),
             reply_to_message_id=user_message_id if user_message_id else None,
         )
 
@@ -549,9 +1024,10 @@ class TelegramPromptClient:
         prompt_id: str,
         *,
         download_dir: Path,
+        allow_media_group: bool = False,
     ) -> TelegramReplyResolution | TelegramReplyRejection:
         """Turn one matched Telegram reply into an agent-facing response or a retry prompt."""
-        if isinstance(message.get("media_group_id"), str):
+        if isinstance(message.get("media_group_id"), str) and not allow_media_group:
             return TelegramReplyRejection(
                 f"⚠️ Unsupported reply for [{prompt_id}]. Albums/media groups are not supported yet. "
                 "Please reply again with a single text, file, media, location, venue, or contact message."
@@ -742,6 +1218,59 @@ class TelegramPromptClient:
             "single file/media message, location, venue, or contact."
         )
 
+    async def _build_attachment_group_resolution(
+        self,
+        messages: list[dict[str, Any]],
+        prompt_id: str,
+        *,
+        download_dir: Path,
+    ) -> TelegramReplyResolution | TelegramReplyRejection:
+        """Build one response for a media group or a short attachment burst."""
+        if not messages:
+            return TelegramReplyRejection(
+                f"⚠️ Unsupported reply for [{prompt_id}]. Please reply again with text, "
+                "file, media, location, venue, or contact."
+            )
+
+        if len(messages) == 1:
+            return await self._build_reply_resolution(
+                messages[0],
+                prompt_id,
+                download_dir=download_dir,
+                allow_media_group=True,
+            )
+
+        item_responses: list[str] = []
+        has_media_group_id = False
+        for index, message in enumerate(messages, start=1):
+            has_media_group_id = has_media_group_id or isinstance(
+                message.get("media_group_id"), str
+            )
+            resolution = await self._build_reply_resolution(
+                message,
+                prompt_id,
+                download_dir=download_dir,
+                allow_media_group=True,
+            )
+            if isinstance(resolution, TelegramReplyRejection):
+                return TelegramReplyRejection(
+                    f"⚠️ Unsupported attachment group for [{prompt_id}]. One item could not be "
+                    f"used: {resolution.user_message}"
+                )
+
+            item_responses.append(f"Item {index}/{len(messages)}:\n{resolution.agent_response}")
+
+        reply_type = "media group" if has_media_group_id else "attachment group"
+        return TelegramReplyResolution(
+            "\n\n".join(
+                [
+                    f"[telegram {reply_type} reply]",
+                    f"Items: {len(messages)}",
+                    *item_responses,
+                ]
+            )
+        )
+
     async def _build_file_reply(
         self,
         reply_type: str,
@@ -837,7 +1366,7 @@ class TelegramPromptClient:
             original_file_name=original_file_name,
             telegram_file_path=file_path,
         )
-        target_path = target_dir / target_name
+        target_path = self._resolve_unique_download_path(target_dir / target_name)
 
         await asyncio.to_thread(self._download_telegram_file_sync, file_path, target_path)
         return str(target_path.resolve())
@@ -883,6 +1412,22 @@ class TelegramPromptClient:
             safe_name = f"{reply_type}-{prompt_id}-{reply_message_id}{suffix}"
 
         return safe_name
+
+    @staticmethod
+    def _resolve_unique_download_path(target_path: Path) -> Path:
+        """Avoid overwriting earlier files from the same Telegram prompt."""
+        if not target_path.exists():
+            return target_path
+
+        stem = target_path.stem
+        suffix = target_path.suffix
+        parent = target_path.parent
+        counter = 2
+        while True:
+            candidate = parent / f"{stem}-{counter}{suffix}"
+            if not candidate.exists():
+                return candidate
+            counter += 1
 
     @staticmethod
     def _choose_photo_variant(photo_payload: Any) -> Optional[dict[str, Any]]:
@@ -958,6 +1503,47 @@ class TelegramPromptClient:
         return f"[telegram {reply_type} reply]\n" + "\n".join(cleaned_lines)
 
     @staticmethod
+    def _parse_series_command(text: str) -> Optional[str]:
+        """Parse explicit multi-message reply commands."""
+        cleaned = text.strip().lower()
+        if any(char.isspace() for char in cleaned):
+            return None
+
+        command, separator, bot_username = cleaned.partition("@")
+        if separator and not bot_username:
+            return None
+        if bot_username and not bot_username.replace("_", "").isalnum():
+            return None
+
+        if command == "/files_start":
+            return "begin"
+        if command == "/files_finish":
+            return "commit"
+        if command == "/files_cancel":
+            return "cancel"
+        return None
+
+    @classmethod
+    def _is_file_or_media_reply(cls, message: dict[str, Any]) -> bool:
+        """Return whether this message should be debounced as an attachment reply."""
+        if isinstance(message.get("media_group_id"), str):
+            return True
+        return any(key in message for key in cls.ATTACHMENT_REPLY_KEYS)
+
+    @staticmethod
+    def _build_attachment_group_key(
+        prompt_message_id: int,
+        message: dict[str, Any],
+    ) -> tuple[int, str]:
+        """Group attachment replies by the prompt they answer."""
+        return prompt_message_id, "ungrouped"
+
+    @staticmethod
+    def _build_series_group_key(prompt_message_id: int) -> tuple[int, str]:
+        """Build the explicit series group key for one prompt."""
+        return prompt_message_id, "series"
+
+    @staticmethod
     def _is_user_reply_candidate(message: dict[str, Any]) -> bool:
         """Decide whether a non-reply Telegram message looks like an attempted answer."""
         candidate_keys = (
@@ -988,10 +1574,27 @@ class TelegramPromptClient:
             "chat_id": self.chat_id,
             "text": text,
         }
+        if self._status_text_uses_html(text):
+            payload["parse_mode"] = self.PROMPT_PARSE_MODE
         if reply_to_message_id is not None:
             payload["reply_to_message_id"] = reply_to_message_id
 
-        await self._bot_api_request("sendMessage", payload, timeout=20)
+        try:
+            await self._bot_api_request("sendMessage", payload, timeout=20)
+        except TelegramPromptError as exc:
+            if "parse_mode" not in payload or not self._is_markup_parse_error(exc):
+                raise
+            fallback_payload = {
+                **payload,
+                "text": telegram_html_to_plain_text(text),
+            }
+            fallback_payload.pop("parse_mode", None)
+            await self._bot_api_request("sendMessage", fallback_payload, timeout=20)
+
+    @staticmethod
+    def _status_text_uses_html(text: str) -> bool:
+        """Return whether a fixed status/warning message uses Telegram HTML markup."""
+        return "<b>" in text or "</b>" in text
 
     async def _safe_send_status_message(
         self, text: str, *, reply_to_message_id: Optional[int] = None
@@ -1077,13 +1680,23 @@ class TelegramPromptClient:
         else:
             prompt_target = f"Prompt [{stale_prompt_id}]"
 
-        warning_text = self.STALE_REPLY_HINT_TEMPLATE.format(prompt_target=prompt_target)
+        warning_text = self._with_series_attachment_hint(
+            self.STALE_REPLY_HINT_TEMPLATE.format(prompt_target=prompt_target),
+            message,
+        )
         user_message_id = self._extract_message_id(message)
         await self._send_status_message(
             warning_text,
             reply_to_message_id=user_message_id if user_message_id else None,
         )
         return True
+
+    @classmethod
+    def _with_series_attachment_hint(cls, warning_text: str, message: dict[str, Any]) -> str:
+        """Append the explicit series hint only for ignored attachment attempts."""
+        if not cls._is_file_or_media_reply(message):
+            return warning_text
+        return warning_text + cls.SERIES_ATTACHMENT_HINT_TEXT
 
     @staticmethod
     def _parse_broker_reference(prompt_text: str) -> Optional[tuple[str, str]]:

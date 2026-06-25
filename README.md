@@ -384,21 +384,39 @@ Telegram reply behavior:
   included in the agent-facing response
 - long text replies that Telegram splits into multiple reply messages are
   recombined when the split parts still reply to the same bot message
+- albums/media groups are combined into one agent-facing response
+- short bursts of ungrouped file/media replies are combined too, so multiple
+  screenshots or documents can be sent even when Telegram's `Group items` option
+  is disabled
+- for many or delayed attachments, reply with `/files_start`, send the items as
+  normal Telegram messages, then send `/files_finish`; use `/files_cancel` to
+  discard the collected items and keep the prompt waiting
 - if a local broker is actively waiting and you send a non-reply message, it sends
-  a short warning that the message is ignored and you must use Reply
+  a short warning that the message is ignored and you must use Reply; attachment
+  warnings also mention `/files_start`
 - if you reply to a message that is not the currently active question, it sends
   a warning instead of silently consuming the reply
 - if you reply to one of this broker's own older inactive prompt messages, it sends
   a short warning that the old question is no longer active
 - successful replies get a `Received [Prompt ID]` acknowledgement
-- supported replies include text, single files/media messages up to 20 MB,
+- supported replies include text, files/media messages up to 20 MB each,
   location, venue, and contact
-- albums/media groups are not supported yet; reply again with a single message
 - files are downloaded locally and returned to the agent as local paths
+- if one item in an attachment group is unsupported or too large, the whole group
+  is rejected and the prompt keeps waiting for a valid reply
 - replies that appear intended for another broker instance trigger a warning
   instead of being silently misrouted
 - Telegram delivery failures for the initial question or retry/warning messages
   are returned to the agent as prompt errors
+
+Optional command menu: in `@BotFather`, run `/setcommands`, pick your bot, and
+send:
+
+```text
+files_start - Start collecting many attachments
+files_finish - Send the collected attachments
+files_cancel - Cancel the current attachment collection
+```
 
 </details>
 
