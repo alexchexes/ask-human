@@ -9,7 +9,7 @@ from typing import Any, Callable, Optional, cast
 
 from .prompt_formatting import resolve_dialog_title
 
-DEFAULT_DIALOG_TIMEOUT_SECONDS = 120
+DEFAULT_DIALOG_TIMEOUT_SECONDS = 3600
 PACKAGE_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 WINDOWS_DIALOG_SCREEN_WIDTH_RATIO = 0.85
 WINDOWS_DIALOG_MIN_WRAP_WIDTH_PX = 600

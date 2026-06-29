@@ -25,6 +25,23 @@ from .telegram_models import (
 )
 
 
+class TelegramBotApiError(TelegramPromptError):
+    """Telegram Bot API failure with enough metadata to classify polling retries."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        method: str,
+        http_status: Optional[int] = None,
+        transport_error: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.method = method
+        self.http_status = http_status
+        self.transport_error = transport_error
+
+
 @dataclass
 class _PendingAttachmentGroup:
     """Collect file/media reply messages that belong to one agent answer."""
@@ -45,6 +62,8 @@ class TelegramPromptClient:
     ISSUE_URL = "https://github.com/alexchexes/ask-human/issues"
     PROMPT_PARSE_MODE = "HTML"
     SHUTDOWN_TIMEOUT_SECONDS = DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS + 15
+    POLL_RETRY_DELAYS_SECONDS = (1.0, 2.0, 5.0, 10.0)
+    POLL_RETRY_MAX_ELAPSED_SECONDS = 120.0
     ATTACHMENT_REPLY_DEBOUNCE_SECONDS = 1.0
     TEXT_REPLY_SPLIT_DEBOUNCE_SECONDS = 0.7
     TEXT_REPLY_SPLIT_MIN_LENGTH = 3500
@@ -235,6 +254,8 @@ class TelegramPromptClient:
 
     async def _poll_updates(self) -> None:
         """Long-poll Telegram updates and resolve pending prompt futures."""
+        retry_started_at: Optional[float] = None
+        retry_attempt = 0
         try:
             while True:
                 async with self._lock:
@@ -248,15 +269,28 @@ class TelegramPromptClient:
                 poll_timeout = (
                     0 if not has_pending_prompts else DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS
                 )
-                updates = await self._bot_api_request(
-                    "getUpdates",
-                    {
-                        "offset": offset,
-                        "timeout": poll_timeout,
-                        "allowed_updates": ["message"],
-                    },
-                    timeout=poll_timeout + 10,
-                )
+                try:
+                    updates = await self._bot_api_request(
+                        "getUpdates",
+                        {
+                            "offset": offset,
+                            "timeout": poll_timeout,
+                            "allowed_updates": ["message"],
+                        },
+                        timeout=poll_timeout + 10,
+                    )
+                except TelegramPromptError as exc:
+                    if has_pending_prompts and self._is_retryable_poll_error(exc):
+                        now = asyncio.get_running_loop().time()
+                        if retry_started_at is None:
+                            retry_started_at = now
+                        if now - retry_started_at <= self.POLL_RETRY_MAX_ELAPSED_SECONDS:
+                            await asyncio.sleep(self._poll_retry_delay(retry_attempt))
+                            retry_attempt += 1
+                            continue
+                    raise
+                retry_started_at = None
+                retry_attempt = 0
 
                 if not isinstance(updates, list):
                     raise TelegramPromptError("Telegram getUpdates returned an unexpected payload.")
@@ -303,6 +337,23 @@ class TelegramPromptClient:
                     pending_prompt.future.set_exception(
                         TelegramPromptError(f"Telegram polling failed: {exc}")
                     )
+
+    @classmethod
+    def _poll_retry_delay(cls, retry_attempt: int) -> float:
+        """Return the progressive backoff delay for a retryable poll failure."""
+        index = min(retry_attempt, len(cls.POLL_RETRY_DELAYS_SECONDS) - 1)
+        return cls.POLL_RETRY_DELAYS_SECONDS[index]
+
+    @staticmethod
+    def _is_retryable_poll_error(error: TelegramPromptError) -> bool:
+        """Retry only idempotent Telegram polling failures that are usually transient."""
+        if not isinstance(error, TelegramBotApiError):
+            return False
+        if error.method != "getUpdates":
+            return False
+        if error.transport_error:
+            return True
+        return error.http_status is not None and 500 <= error.http_status < 600
 
     async def _handle_update(self, update: dict[str, Any]) -> None:
         """Process one Telegram update and resolve or reject matching replies."""
@@ -1737,15 +1788,22 @@ class TelegramPromptClient:
                 payload_json = json.load(response)
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
-            raise TelegramPromptError(
-                f"Telegram {method} failed with HTTP {exc.code}: {error_body}"
+            raise TelegramBotApiError(
+                f"Telegram {method} failed with HTTP {exc.code}: {error_body}",
+                method=method,
+                http_status=exc.code,
             ) from exc
         except OSError as exc:
-            raise TelegramPromptError(f"Telegram {method} request failed: {exc}") from exc
+            raise TelegramBotApiError(
+                f"Telegram {method} request failed: {exc}",
+                method=method,
+                transport_error=True,
+            ) from exc
 
         if not isinstance(payload_json, dict) or not payload_json.get("ok"):
-            raise TelegramPromptError(
-                f"Telegram {method} failed: {payload_json.get('description', 'unknown error')}"
+            raise TelegramBotApiError(
+                f"Telegram {method} failed: {payload_json.get('description', 'unknown error')}",
+                method=method,
             )
 
         return payload_json.get("result")

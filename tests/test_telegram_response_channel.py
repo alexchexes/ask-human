@@ -15,7 +15,7 @@ from ask_human.prompt_formatting import (
     render_markdown_to_telegram_html,
     telegram_html_to_plain_text,
 )
-from ask_human.telegram_client import TelegramPromptClient
+from ask_human.telegram_client import TelegramBotApiError, TelegramPromptClient
 from ask_human.telegram_models import (
     DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS,
     TelegramConfig,
@@ -78,6 +78,126 @@ def test_telegram_client_shutdown_waits_for_poller_to_stop(tmp_path):
         assert client._poller_task is None
 
     asyncio.run(run_shutdown_flow())
+
+
+def test_telegram_client_retries_transient_get_updates_timeout(monkeypatch, tmp_path):
+    """Keep a pending prompt alive when one Telegram long-poll read times out."""
+    monkeypatch.setattr(TelegramPromptClient, "POLL_RETRY_DELAYS_SECONDS", (0.0,))
+
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    poll_calls = 0
+    sent_messages = []
+
+    async def fake_bot_api_request(method, payload, timeout):
+        nonlocal poll_calls
+        if method == "sendMessage":
+            sent_messages.append(payload)
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 302}
+        if method == "getUpdates":
+            poll_calls += 1
+            if poll_calls == 1:
+                raise TelegramBotApiError(
+                    "Telegram getUpdates request failed: The read operation timed out",
+                    method="getUpdates",
+                    transport_error=True,
+                )
+            if poll_calls == 2:
+                return [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "message_id": 210,
+                            "chat": {"id": -1009876543210},
+                            "reply_to_message": {"message_id": 101},
+                            "text": "proper reply",
+                        },
+                    }
+                ]
+            return []
+        raise AssertionError(f"Unexpected Telegram method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    assert result == "proper reply"
+    assert poll_calls >= 2
+    assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
+
+
+def test_telegram_client_stops_after_poll_retry_budget(monkeypatch, tmp_path):
+    """Surface a real polling outage instead of retrying until the prompt timeout."""
+    monkeypatch.setattr(TelegramPromptClient, "POLL_RETRY_DELAYS_SECONDS", (0.0,))
+    monkeypatch.setattr(TelegramPromptClient, "POLL_RETRY_MAX_ELAPSED_SECONDS", 0.0)
+
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    poll_calls = 0
+
+    async def fake_bot_api_request(method, payload, timeout):
+        nonlocal poll_calls
+        if method == "sendMessage":
+            return {"message_id": 101}
+        if method == "getUpdates":
+            poll_calls += 1
+            raise TelegramBotApiError(
+                "Telegram getUpdates request failed: The read operation timed out",
+                method="getUpdates",
+                transport_error=True,
+            )
+        raise AssertionError(f"Unexpected Telegram method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    with pytest.raises(
+        TelegramPromptError,
+        match="Telegram polling failed: Telegram getUpdates request failed",
+    ):
+        asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+    assert poll_calls >= 2
+
+
+def test_telegram_client_does_not_retry_non_retryable_get_updates_error(
+    monkeypatch,
+    tmp_path,
+):
+    """Abort promptly for polling errors such as conflicts or bad configuration."""
+    monkeypatch.setattr(TelegramPromptClient, "POLL_RETRY_DELAYS_SECONDS", (0.0,))
+
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    poll_calls = 0
+
+    async def fake_bot_api_request(method, payload, timeout):
+        nonlocal poll_calls
+        if method == "sendMessage":
+            return {"message_id": 101}
+        if method == "getUpdates":
+            poll_calls += 1
+            raise TelegramBotApiError(
+                "Telegram getUpdates failed with HTTP 409: conflict",
+                method="getUpdates",
+                http_status=409,
+            )
+        raise AssertionError(f"Unexpected Telegram method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    with pytest.raises(
+        TelegramPromptError,
+        match="Telegram polling failed: Telegram getUpdates failed with HTTP 409",
+    ):
+        asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+    assert poll_calls == 1
 
 
 def test_build_dialog_telegram_notice_is_platform_specific():

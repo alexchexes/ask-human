@@ -61,13 +61,14 @@ class TelegramBrokerClient:
     ) -> Optional[str]:
         """Ensure a local broker exists, then forward one Telegram prompt through it."""
         broker_health = await self._ensure_local_broker()
+        telegram_issued_at = dt.datetime.now().astimezone() if include_timing_info else issued_at
         prompt_text = build_telegram_prompt_text(
             question,
             context,
             prompt_id=prompt_id,
             timeout_seconds=timeout_seconds,
             include_timing_info=include_timing_info,
-            issued_at=issued_at,
+            issued_at=telegram_issued_at,
             broker_label=broker_health.broker_label,
             broker_id=broker_health.broker_id,
         )
@@ -77,7 +78,7 @@ class TelegramBrokerClient:
             prompt_id=prompt_id,
             timeout_seconds=timeout_seconds,
             include_timing_info=include_timing_info,
-            issued_at=issued_at,
+            issued_at=telegram_issued_at,
             broker_label=broker_health.broker_label,
             broker_id=broker_health.broker_id,
         )

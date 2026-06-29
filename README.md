@@ -378,6 +378,7 @@ Telegram reply behavior:
 - files are downloaded locally and returned to the agent as local paths
 - if one item in an attachment group is unsupported or too large, the whole group is rejected and the prompt keeps waiting for a valid reply
 - replies that appear intended for another broker instance trigger a warning instead of being silently misrouted
+- transient Telegram polling transport failures and HTTP 5xx responses are retried briefly with backoff; persistent polling failures are returned to the agent as prompt errors
 - Telegram delivery failures for the initial question or retry/warning messages are returned to the agent as prompt errors
 
 Optional command menu: in `@BotFather`, run `/setcommands`, pick your bot, and send:
@@ -402,14 +403,14 @@ command = "uvx"
 args = [
   "ask-human",
   "--transport", "stdio",
-  "--timeout-seconds", "86400", # tool internal timeout; 86400 = 24 h
+  "--timeout-seconds", "3600", # human reply window; 3600 = 1 h
   "--show-timing-info", # show remaining time to answer
   "--response-channel", "both", # dialog | telegram | both
   "--telegram", "<bot_token> <chat_id>", # creds for your personal tg bot used ONLY ON THIS MACHINE
   "--dialog-title", "Codex asks..." # Custom OS dialogue title
 ]
-# make sure client tool call timeout is same as or greater than tool internal timeout
-tool_timeout_sec = 86400 # 24 h
+# keep client timeout slightly larger than Ask Human's reply window
+tool_timeout_sec = 3660 # 1 h + 1 min
 
 # Codex CLI v0.142.0-alpha.1+ / VS Code extension v26.616.30709+
 [features.code_mode]
@@ -429,13 +430,13 @@ Project-scoped `.mcp.json` equivalent:
       "args": [
         "ask-human",
         "--transport", "stdio",
-        "--timeout-seconds", "86400",
+        "--timeout-seconds", "3600",
         "--show-timing-info",
         "--response-channel", "both",
         "--telegram", "<bot_token> <chat_id>",
         "--dialog-title", "Claude asks..."
       ],
-      "timeout": 86400000
+      "timeout": 3660000
     }
   }
 }
@@ -456,7 +457,7 @@ Project-local `.cursor/mcp.json` or global `~/.cursor/mcp.json`:
       "args": [
         "ask-human",
         "--transport", "stdio",
-        "--timeout-seconds", "86400",
+        "--timeout-seconds", "3600",
         "--show-timing-info",
         "--response-channel", "both",
         "--telegram", "<bot_token> <chat_id>",
@@ -485,13 +486,22 @@ ask-human --transport sse --host 0.0.0.0 --port 8080
 
 #### Timeout
 
-The internal timeout that affects OS dialog and Telegram prompts. Defaults to 120 seconds.
+The internal timeout that affects OS dialog and Telegram prompts. Defaults to 3600 seconds.
 
 ```bash
 ask-human --transport stdio --timeout-seconds 1200
 ```
 
-MCP clients may enforce their own tool-call timeout. If your client supports a tool timeout setting, set it to at least the same value as `--timeout-seconds`; otherwise the client may stop waiting before Ask Human does.
+MCP clients may enforce their own tool-call timeout. If your client supports a tool timeout setting, set it above `--timeout-seconds`; otherwise the client may stop waiting before Ask Human does.
+
+| Desired reply window | `--timeout-seconds` | MCP tool timeout |
+| --- | ---: | ---: |
+| 5 min | `300` | `360s` / `360000ms` |
+| 20 min | `1200` | `1260s` / `1260000ms` |
+| 1 h | `3600` | `3660s` / `3660000ms` |
+| 24 h | `86400` | `86460s` / `86460000ms` |
+
+For short timeouts, such as 2 minutes, Telegram connection problems can make outage errors race with the normal timeout.
 
 #### Response channels
 

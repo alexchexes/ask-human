@@ -6,6 +6,7 @@ import datetime as dt
 import pytest
 
 from ask_human import __version__
+from ask_human import telegram_broker_client as broker_client_module
 from ask_human.broker_state import (
     TelegramBrokerHealth,
     load_or_create_broker_identity,
@@ -66,6 +67,75 @@ def test_broker_client_builds_prompt_with_broker_metadata(monkeypatch, tmp_path)
     assert "Broker: Alex Laptop [abcd1234]" in captured["payload"]["prompt_text"]
     assert captured["payload"]["prompt_texts"] == [captured["payload"]["prompt_text"]]
     assert captured["payload"]["download_dir"] == str((tmp_path / "downloads").resolve())
+
+
+def test_broker_client_uses_delivery_time_for_telegram_timing(monkeypatch, tmp_path):
+    """Build Telegram timing metadata after broker startup, close to delivery time."""
+    client = TelegramBrokerClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path / "downloads",
+        broker_state_root=tmp_path / "state",
+    )
+    original_issued_at = dt.datetime(1999, 1, 1, 0, 0, 0)
+    delivery_issued_at = dt.datetime(2026, 5, 11, 10, 0, 0, tzinfo=dt.timezone.utc)
+    captured = {}
+
+    async def fake_ensure_local_broker():
+        captured["broker_ready"] = True
+        return TelegramBrokerHealth(
+            broker_id="abcd1234",
+            broker_label="Alex Laptop",
+            listen_url="http://127.0.0.1:7456",
+            target_key="feedbeef",
+        )
+
+    class FakeDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            assert captured["broker_ready"] is True
+            if tz is None:
+                return delivery_issued_at
+            return delivery_issued_at.astimezone(tz)
+
+    def fake_build_telegram_prompt_text(*args, **kwargs):
+        captured["prompt_issued_at"] = kwargs["issued_at"]
+        return "Prompt text"
+
+    def fake_build_telegram_prompt_texts(*args, **kwargs):
+        captured["prompt_texts_issued_at"] = kwargs["issued_at"]
+        return ["Prompt text"]
+
+    async def fake_broker_request(listen_url, path, payload, *, timeout, method="POST"):
+        return {"status": "ok", "response": "telegram answer"}
+
+    monkeypatch.setattr(client, "_ensure_local_broker", fake_ensure_local_broker)
+    monkeypatch.setattr(client, "_broker_request", fake_broker_request)
+    monkeypatch.setattr(broker_client_module.dt, "datetime", FakeDateTime)
+    monkeypatch.setattr(
+        broker_client_module,
+        "build_telegram_prompt_text",
+        fake_build_telegram_prompt_text,
+    )
+    monkeypatch.setattr(
+        broker_client_module,
+        "build_telegram_prompt_texts",
+        fake_build_telegram_prompt_texts,
+    )
+
+    result = asyncio.run(
+        client.ask_question(
+            "Prompt text",
+            "Context text.",
+            prompt_id="QTEST-1234",
+            timeout_seconds=300,
+            include_timing_info=True,
+            issued_at=original_issued_at,
+        )
+    )
+
+    assert result == "telegram answer"
+    assert captured["prompt_issued_at"] == delivery_issued_at
+    assert captured["prompt_texts_issued_at"] == delivery_issued_at
 
 
 def test_broker_client_waits_for_started_broker(monkeypatch, tmp_path):
