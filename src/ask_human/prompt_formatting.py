@@ -70,7 +70,7 @@ def initialize_time_locale() -> None:
 
 def render_markdown_to_telegram_html(markdown_text: str) -> str:
     """Render common Markdown to Telegram-supported HTML."""
-    tokens = TELEGRAM_MARKDOWN.parse(markdown_text.strip())
+    tokens = TELEGRAM_MARKDOWN.parse(_trim_markdown_boundary_blank_lines(markdown_text))
     parts: list[str] = []
     list_stack: list[_TelegramListState] = []
     list_item_depth = 0
@@ -361,12 +361,14 @@ def build_telegram_prompt_text(
 ) -> str:
     """Build a Telegram-specific prompt using HTML parse mode and compact metadata."""
     parts: list[str] = []
+    context_markdown = _trim_markdown_boundary_blank_lines(context)
+    question_markdown = _trim_markdown_boundary_blank_lines(question)
 
-    if context.strip():
+    if context_markdown.strip():
         parts.extend(
             [
                 "<b>📋 Context:</b>",
-                render_markdown_to_telegram_html(context.strip()),
+                render_markdown_to_telegram_html(context_markdown),
                 "",
                 TELEGRAM_PROMPT_SEPARATOR,
                 "",
@@ -376,7 +378,7 @@ def build_telegram_prompt_text(
     parts.extend(
         [
             "<b>❓ Question:</b>",
-            render_markdown_to_telegram_html(question.strip()),
+            render_markdown_to_telegram_html(question_markdown),
             "",
             TELEGRAM_PROMPT_SEPARATOR,
             "",
@@ -413,9 +415,11 @@ def build_telegram_prompt_texts(
     broker_id: Optional[str] = None,
 ) -> list[str]:
     """Build one or more Telegram prompt messages, splitting only when needed."""
+    context_markdown = _trim_markdown_boundary_blank_lines(context)
+    question_markdown = _trim_markdown_boundary_blank_lines(question)
     full_prompt = build_telegram_prompt_text(
-        question,
-        context,
+        question_markdown,
+        context_markdown,
         prompt_id=prompt_id,
         timeout_seconds=timeout_seconds,
         include_timing_info=include_timing_info,
@@ -427,10 +431,10 @@ def build_telegram_prompt_texts(
         return [full_prompt]
 
     messages: list[str] = []
-    if context.strip():
-        messages.extend(_build_telegram_section_messages("📋 Context", context.strip()))
+    if context_markdown.strip():
+        messages.extend(_build_telegram_section_messages("📋 Context", context_markdown))
 
-    messages.extend(_build_telegram_section_messages("❓ Question", question.strip()))
+    messages.extend(_build_telegram_section_messages("❓ Question", question_markdown))
     messages.append(
         "\n".join(
             [
@@ -499,23 +503,29 @@ def _build_telegram_section_messages(label: str, markdown_text: str) -> list[str
 
 def _split_text_naturally(text: str, max_chars: int) -> list[str]:
     """Split text on paragraph, line, or word boundaries, with hard fallback splits."""
-    remaining = text.strip()
+    remaining = _trim_markdown_boundary_blank_lines(text)
     if not remaining:
         return []
 
     chunks: list[str] = []
     while len(remaining) > max_chars:
         split_at = _find_natural_split(remaining, max_chars)
-        chunk = remaining[:split_at].strip()
+        chunk = _trim_markdown_boundary_blank_lines(remaining[:split_at])
         if not chunk:
             chunk = remaining[:max_chars]
             split_at = max_chars
         chunks.append(chunk)
-        remaining = remaining[split_at:].strip()
+        remaining = _trim_markdown_boundary_blank_lines(remaining[split_at:])
 
     if remaining:
         chunks.append(remaining)
     return chunks
+
+
+def _trim_markdown_boundary_blank_lines(text: str) -> str:
+    """Trim surrounding blank lines without changing content-line indentation."""
+    without_leading_blank_lines = re.sub(r"\A(?:[ \t]*\r?\n)+", "", text)
+    return re.sub(r"(?:\r?\n[ \t]*)+\Z", "", without_leading_blank_lines)
 
 
 def _find_natural_split(text: str, max_chars: int) -> int:

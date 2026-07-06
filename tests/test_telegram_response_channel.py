@@ -328,6 +328,30 @@ def test_render_markdown_to_telegram_html_preserves_block_spacing():
     )
 
 
+def test_render_markdown_to_telegram_html_preserves_boundary_indentation():
+    """Do not strip indentation that changes Markdown code-block parsing."""
+    assert render_markdown_to_telegram_html("   ```bash\n   echo hi\n   ```") == (
+        '<pre><code class="language-bash">echo hi\n</code></pre>'
+    )
+    assert render_markdown_to_telegram_html(
+        "    python -m pip install --user ask-human\n" "    ask-human --help"
+    ) == ("<pre>python -m pip install --user ask-human\n" "ask-human --help\n" "</pre>")
+
+
+def test_build_telegram_prompt_text_preserves_question_boundary_indentation():
+    """Keep prompt-start indentation before rendering the Telegram question section."""
+    prompt_text = build_telegram_prompt_text(
+        "   ```bash\n   echo hi\n   ```",
+        "",
+        prompt_id="QTEST-1234",
+        timeout_seconds=300,
+        include_timing_info=False,
+    )
+
+    assert '<pre><code class="language-bash">echo hi\n</code></pre>' in prompt_text
+    assert "   echo hi" not in prompt_text
+
+
 def test_telegram_html_to_plain_text_removes_markup_but_preserves_text():
     """Produce a readable fallback when Telegram rejects HTML parsing."""
     assert (
