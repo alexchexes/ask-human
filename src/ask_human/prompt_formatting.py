@@ -74,23 +74,40 @@ def render_markdown_to_telegram_html(markdown_text: str) -> str:
     parts: list[str] = []
     list_stack: list[_TelegramListState] = []
     list_item_depth = 0
+    blockquote_depth = 0
     previous_token_type: Optional[str] = None
 
-    def has_trailing_newline() -> bool:
-        return bool(parts) and parts[-1].endswith("\n")
+    def trailing_newline_count() -> int:
+        count = 0
+        for part in reversed(parts):
+            for character in reversed(part):
+                if character != "\n":
+                    return count
+                count += 1
+        return count
 
     def ensure_newline() -> None:
-        if parts and not has_trailing_newline():
-            parts.append("\n")
+        ensure_newlines(1)
+
+    def ensure_blank_line() -> None:
+        ensure_newlines(2)
+
+    def ensure_newlines(count: int) -> None:
+        if not parts:
+            return
+        missing_count = count - trailing_newline_count()
+        if missing_count > 0:
+            parts.append("\n" * missing_count)
 
     def append_fenced_code(token: Token) -> None:
         ensure_newline()
         language = _extract_telegram_code_language(token.info)
         escaped_content = escape_telegram_html(token.content)
         if language:
-            parts.append(f'<pre><code class="language-{language}">{escaped_content}</code></pre>\n')
+            parts.append(f'<pre><code class="language-{language}">{escaped_content}</code></pre>')
         else:
-            parts.append(f"<pre>{escaped_content}</pre>\n")
+            parts.append(f"<pre>{escaped_content}</pre>")
+        ensure_blank_line()
 
     for token in tokens:
         token_type = token.type
@@ -99,12 +116,16 @@ def render_markdown_to_telegram_html(markdown_text: str) -> str:
             previous_token_type = token_type
             continue
         if token_type == "heading_close":
-            parts.append("</b>\n")
+            parts.append("</b>")
+            ensure_blank_line()
             previous_token_type = token_type
             continue
         if token_type == "paragraph_close":
             if list_item_depth == 0:
-                ensure_newline()
+                if blockquote_depth > 0:
+                    ensure_newline()
+                else:
+                    ensure_blank_line()
             previous_token_type = token_type
             continue
         if token_type == "inline":
@@ -116,10 +137,13 @@ def render_markdown_to_telegram_html(markdown_text: str) -> str:
         if token_type == "blockquote_open":
             ensure_newline()
             parts.append("<blockquote>")
+            blockquote_depth += 1
             previous_token_type = token_type
             continue
         if token_type == "blockquote_close":
-            parts.append("</blockquote>\n")
+            blockquote_depth = max(0, blockquote_depth - 1)
+            parts.append("</blockquote>")
+            ensure_blank_line()
             previous_token_type = token_type
             continue
         if token_type == "bullet_list_open":
@@ -137,7 +161,10 @@ def render_markdown_to_telegram_html(markdown_text: str) -> str:
         if token_type in {"bullet_list_close", "ordered_list_close"}:
             if list_stack:
                 list_stack.pop()
-            ensure_newline()
+            if list_stack or list_item_depth > 0:
+                ensure_newline()
+            else:
+                ensure_blank_line()
             previous_token_type = token_type
             continue
         if token_type == "list_item_open":
@@ -157,7 +184,8 @@ def render_markdown_to_telegram_html(markdown_text: str) -> str:
             continue
         if token_type == "hr":
             ensure_newline()
-            parts.append(f"{TELEGRAM_PROMPT_SEPARATOR}\n")
+            parts.append(TELEGRAM_PROMPT_SEPARATOR)
+            ensure_blank_line()
             previous_token_type = token_type
             continue
         if token.content:

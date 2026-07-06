@@ -287,15 +287,44 @@ def test_render_markdown_to_telegram_html_for_common_agent_markdown():
 
     assert render_markdown_to_telegram_html(text) == (
         "<b>Heading</b>\n"
+        "\n"
         "<b>Bold text</b>\n"
+        "\n"
         "- asterisk bullet\n"
+        "\n"
         "- dash bullet\n"
         "<code>**code stays literal**</code>\n"
+        "\n"
         "<blockquote>Quote stays visible and <b>bold</b>\n"
         "</blockquote>\n"
+        "\n"
         '<a href="https://openai.com/?a=1&amp;b=2">OpenAI</a>\n'
+        "\n"
         '<pre><code class="language-python">print("&lt;literal&gt;")\n'
         "</code></pre>"
+    )
+
+
+def test_render_markdown_to_telegram_html_preserves_block_spacing():
+    """Keep Markdown paragraph and section breaks readable in Telegram prompts."""
+    text = (
+        "## First section\n\n"
+        "First paragraph\n"
+        "with a soft break.\n\n"
+        "Second paragraph.\n\n"
+        "- one\n"
+        "- two\n\n"
+        "After list."
+    )
+
+    assert render_markdown_to_telegram_html(text) == (
+        "<b>First section</b>\n\n"
+        "First paragraph\n"
+        "with a soft break.\n\n"
+        "Second paragraph.\n\n"
+        "- one\n"
+        "- two\n\n"
+        "After list."
     )
 
 
