@@ -1,6 +1,7 @@
 """Tests for Telegram broker state and broker-mode entrypoint behavior."""
 
 import asyncio
+import json
 import sys
 from typing import Any, cast
 
@@ -316,6 +317,8 @@ def test_main_runs_telegram_broker_mode(monkeypatch, tmp_path):
             "office",
             "--telegram-broker-state-dir",
             str(tmp_path),
+            "--telegram-debug-log",
+            str(tmp_path / "telegram-debug.jsonl"),
             "--telegram-broker-host",
             "127.0.0.1",
             "--telegram-broker-port",
@@ -335,6 +338,7 @@ def test_main_runs_telegram_broker_mode(monkeypatch, tmp_path):
     assert captured["host"] == "127.0.0.1"
     assert captured["port"] == 7456
     assert captured["broker_label"] == "office"
+    assert captured["debug_log_path"] == str(tmp_path / "telegram-debug.jsonl")
     assert captured["telegram_target"] == telegram_target
     assert captured["state_dir"] == resolve_target_broker_state_dir(
         tmp_path.resolve(), telegram_target
@@ -419,6 +423,12 @@ def test_run_telegram_broker_exits_cleanly_on_keyboard_interrupt(monkeypatch, tm
         state_dir=tmp_path,
         telegram_target=TelegramConfig("123456:ABCDEF", "-1009876543210"),
         broker_label="office",
+        debug_log_path=str(tmp_path / "telegram-debug.jsonl"),
     )
 
     assert fake_socket.closed is True
+    events = [
+        json.loads(line)["event"]
+        for line in (tmp_path / "telegram-debug.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert events == ["broker_start", "broker_stop"]

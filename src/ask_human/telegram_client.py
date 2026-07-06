@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import shutil
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Any, Optional, cast
 
 from .broker_state import TelegramBrokerIdentity
+from .debug_logging import TelegramDebugLogger, duration_ms
 from .prompt_formatting import TELEGRAM_DOWNLOAD_LIMIT_LABEL, telegram_html_to_plain_text
 from .telegram_models import (
     DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS,
@@ -62,6 +64,7 @@ class TelegramPromptClient:
     ISSUE_URL = "https://github.com/alexchexes/ask-human/issues"
     PROMPT_PARSE_MODE = "HTML"
     SHUTDOWN_TIMEOUT_SECONDS = DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS + 15
+    IDLE_DRAIN_HTTP_TIMEOUT_SECONDS = 2
     POLL_RETRY_DELAYS_SECONDS = (1.0, 2.0, 5.0, 10.0)
     POLL_RETRY_MAX_ELAPSED_SECONDS = 120.0
     ATTACHMENT_REPLY_DEBOUNCE_SECONDS = 1.0
@@ -97,17 +100,20 @@ class TelegramPromptClient:
         download_dir: Optional[Path] = None,
         *,
         broker_identity: Optional[TelegramBrokerIdentity] = None,
+        debug_log_path: Optional[str] = None,
     ) -> None:
         self.bot_token = config.bot_token
         self.chat_id = config.chat_id
         self.download_dir = download_dir
         self.broker_identity = broker_identity
+        self.debug_logger = TelegramDebugLogger.from_config(debug_log_path)
         self._lock = asyncio.Lock()
         self._next_update_offset: Optional[int] = None
         self._pending_by_message_id: dict[int, TelegramPendingPrompt] = {}
         self._pending_attachment_groups: dict[tuple[int, str], _PendingAttachmentGroup] = {}
         self._active_series_group: Optional[_PendingAttachmentGroup] = None
         self._poller_task: Optional[asyncio.Task[None]] = None
+        self._background_status_tasks: set[asyncio.Task[None]] = set()
         self._latest_prompt_message_id: Optional[int] = None
 
     async def ask_question(
@@ -123,7 +129,13 @@ class TelegramPromptClient:
         if resolved_download_dir is None:
             raise TelegramPromptError("No Telegram download directory was configured.")
 
-        message_ids = await self._send_prompt_messages(prompt_texts)
+        self._debug_event(
+            "telegram_prompt_start",
+            prompt_id=prompt_id,
+            message_count=len(prompt_texts),
+            timeout_seconds=timeout,
+        )
+        message_ids = await self._send_prompt_messages(prompt_texts, prompt_id=prompt_id)
         response_future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         pending_prompt = TelegramPendingPrompt(
             future=response_future,
@@ -138,8 +150,12 @@ class TelegramPromptClient:
             self._ensure_poller_locked()
 
         try:
-            return await asyncio.wait_for(response_future, timeout)
+            response = await asyncio.wait_for(response_future, timeout)
+            self._debug_event("telegram_prompt_response_returned", prompt_id=prompt_id)
+            await asyncio.sleep(0)
+            return response
         except asyncio.TimeoutError:
+            self._debug_event("telegram_prompt_timeout", prompt_id=prompt_id)
             return None
         finally:
             finalize_task: Optional[asyncio.Task[None]] = None
@@ -199,20 +215,50 @@ class TelegramPromptClient:
             raise TelegramPromptError("Prompt text must contain at least one non-empty message.")
         return cleaned_prompt_texts
 
-    async def _send_prompt_messages(self, prompt_texts: list[str]) -> list[int]:
+    def _debug_event(self, event: str, **fields: Any) -> None:
+        if self.debug_logger is not None:
+            self.debug_logger.event(event, **fields)
+
+    async def _send_prompt_messages(
+        self,
+        prompt_texts: list[str],
+        *,
+        prompt_id: Optional[str] = None,
+    ) -> list[int]:
         """Send all outbound prompt messages and return their message ids."""
         message_ids = []
-        for prompt_text in prompt_texts:
-            message_ids.append(await self._send_prompt(prompt_text))
+        for index, prompt_text in enumerate(prompt_texts, start=1):
+            message_ids.append(
+                await self._send_prompt(
+                    prompt_text,
+                    prompt_id=prompt_id,
+                    prompt_part_index=index,
+                    prompt_part_count=len(prompt_texts),
+                )
+            )
         return message_ids
 
-    async def _send_prompt(self, prompt_text: str) -> int:
+    async def _send_prompt(
+        self,
+        prompt_text: str,
+        *,
+        prompt_id: Optional[str] = None,
+        prompt_part_index: Optional[int] = None,
+        prompt_part_count: Optional[int] = None,
+    ) -> int:
         """Send the outbound Telegram message and return its message id."""
         base_payload: dict[str, Any] = {
             "chat_id": self.chat_id,
             "text": prompt_text,
             "disable_web_page_preview": True,
         }
+        started_at = time.monotonic()
+        self._debug_event(
+            "telegram_prompt_send_start",
+            prompt_id=prompt_id,
+            prompt_part_index=prompt_part_index,
+            prompt_part_count=prompt_part_count,
+        )
         try:
             result = await self._bot_api_request(
                 "sendMessage",
@@ -224,7 +270,21 @@ class TelegramPromptClient:
             )
         except TelegramPromptError as exc:
             if not self._is_markup_parse_error(exc):
+                self._debug_event(
+                    "telegram_prompt_send_error",
+                    prompt_id=prompt_id,
+                    prompt_part_index=prompt_part_index,
+                    duration_ms=duration_ms(started_at),
+                    error=exc,
+                )
                 raise
+            self._debug_event(
+                "telegram_prompt_send_plain_text_fallback",
+                prompt_id=prompt_id,
+                prompt_part_index=prompt_part_index,
+                duration_ms=duration_ms(started_at),
+                error=exc,
+            )
             result = await self._bot_api_request(
                 "sendMessage",
                 {
@@ -238,6 +298,14 @@ class TelegramPromptClient:
         if not isinstance(message_id, int):
             raise TelegramPromptError("Telegram sendMessage did not return a message_id.")
 
+        self._debug_event(
+            "telegram_prompt_send_ok",
+            prompt_id=prompt_id,
+            prompt_part_index=prompt_part_index,
+            message_id=message_id,
+            message_date=result.get("date"),
+            duration_ms=duration_ms(started_at),
+        )
         return message_id
 
     @staticmethod
@@ -269,7 +337,20 @@ class TelegramPromptClient:
                 poll_timeout = (
                     0 if not has_pending_prompts else DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS
                 )
+                http_timeout = (
+                    self.IDLE_DRAIN_HTTP_TIMEOUT_SECONDS
+                    if not has_pending_prompts
+                    else poll_timeout + 10
+                )
+                self._debug_event(
+                    "telegram_poll_start",
+                    has_pending_prompts=has_pending_prompts,
+                    offset=offset,
+                    poll_timeout_seconds=poll_timeout,
+                    http_timeout_seconds=http_timeout,
+                )
                 try:
+                    poll_started_at = time.monotonic()
                     updates = await self._bot_api_request(
                         "getUpdates",
                         {
@@ -277,23 +358,53 @@ class TelegramPromptClient:
                             "timeout": poll_timeout,
                             "allowed_updates": ["message"],
                         },
-                        timeout=poll_timeout + 10,
+                        timeout=http_timeout,
                     )
                 except TelegramPromptError as exc:
+                    if not has_pending_prompts:
+                        self._debug_event("telegram_idle_drain_error", error=exc)
+                        if await self._should_keep_polling_after_idle_drain():
+                            continue
+                        return
                     if has_pending_prompts and self._is_retryable_poll_error(exc):
                         now = asyncio.get_running_loop().time()
                         if retry_started_at is None:
                             retry_started_at = now
                         if now - retry_started_at <= self.POLL_RETRY_MAX_ELAPSED_SECONDS:
-                            await asyncio.sleep(self._poll_retry_delay(retry_attempt))
+                            retry_delay = self._poll_retry_delay(retry_attempt)
+                            self._debug_event(
+                                "telegram_poll_retry",
+                                retry_attempt=retry_attempt + 1,
+                                retry_delay_ms=round(retry_delay * 1000),
+                                retry_elapsed_ms=round((now - retry_started_at) * 1000),
+                                error=exc,
+                            )
+                            await asyncio.sleep(retry_delay)
                             retry_attempt += 1
                             continue
+                    self._debug_event("telegram_poll_error", error=exc)
                     raise
                 retry_started_at = None
                 retry_attempt = 0
 
                 if not isinstance(updates, list):
-                    raise TelegramPromptError("Telegram getUpdates returned an unexpected payload.")
+                    error = TelegramPromptError(
+                        "Telegram getUpdates returned an unexpected payload."
+                    )
+                    if not has_pending_prompts:
+                        self._debug_event("telegram_idle_drain_error", error=error)
+                        if await self._should_keep_polling_after_idle_drain():
+                            continue
+                        return
+                    raise error
+
+                self._debug_event(
+                    "telegram_poll_ok",
+                    has_pending_prompts=has_pending_prompts,
+                    offset=offset,
+                    update_count=len(updates),
+                    duration_ms=duration_ms(poll_started_at),
+                )
 
                 async with self._lock:
                     for update in updates:
@@ -309,8 +420,8 @@ class TelegramPromptClient:
                 # pending prompt completes, keep draining with timeout=0 until Telegram returns
                 # an empty page, then stop the poller.
                 if not has_pending_prompts and not updates:
-                    async with self._lock:
-                        self._poller_task = None
+                    if await self._should_keep_polling_after_idle_drain():
+                        continue
                     return
 
                 # Real getUpdates long-polls, but tests and some failure modes can return
@@ -338,6 +449,14 @@ class TelegramPromptClient:
                         TelegramPromptError(f"Telegram polling failed: {exc}")
                     )
 
+    async def _should_keep_polling_after_idle_drain(self) -> bool:
+        """Return true if a fresh prompt appeared during an idle drain request."""
+        async with self._lock:
+            if self._pending_by_message_id:
+                return True
+            self._poller_task = None
+            return False
+
     @classmethod
     def _poll_retry_delay(cls, retry_attempt: int) -> float:
         """Return the progressive backoff delay for a retryable poll failure."""
@@ -357,14 +476,57 @@ class TelegramPromptClient:
 
     async def _handle_update(self, update: dict[str, Any]) -> None:
         """Process one Telegram update and resolve or reject matching replies."""
+        update_id = update.get("update_id")
+        message = update.get("message")
+        message_id = None
+        message_date = None
+        reply_to_message_id = None
+        reply_to_message_date = None
+        if isinstance(message, dict):
+            message_id = message.get("message_id")
+            message_date = message.get("date")
+            reply_to_message = message.get("reply_to_message")
+            if isinstance(reply_to_message, dict):
+                reply_to_message_id = reply_to_message.get("message_id")
+                reply_to_message_date = reply_to_message.get("date")
+        self._debug_event(
+            "telegram_update_start",
+            update_id=update_id,
+            message_id=message_id,
+            message_date=message_date,
+            reply_to_message_id=reply_to_message_id,
+            reply_to_message_date=reply_to_message_date,
+        )
         matched = await self._match_pending_prompt(update)
         if matched is None:
             matched = await self._match_active_series(update)
         if matched is None:
+            self._debug_event(
+                "telegram_update_unmatched",
+                update_id=update_id,
+                message_id=message_id,
+                message_date=message_date,
+            )
             await self._maybe_hint_on_missing_reply(update)
             return
 
         prompt_message_id, pending_prompt, message = matched
+        matched_message_date = message.get("date")
+        matched_reply_to_message = message.get("reply_to_message")
+        matched_reply_to_message_date = (
+            matched_reply_to_message.get("date")
+            if isinstance(matched_reply_to_message, dict)
+            else None
+        )
+        self._debug_event(
+            "telegram_update_matched",
+            update_id=update_id,
+            message_id=message_id,
+            message_date=matched_message_date,
+            prompt_id=pending_prompt.prompt_id,
+            prompt_message_id=prompt_message_id,
+            reply_to_message_date=matched_reply_to_message_date,
+        )
         selected_quote_text = self._extract_selected_quote_text(message)
         user_message_id = message.get("message_id")
         reply_to_user_message_id = user_message_id if isinstance(user_message_id, int) else None
@@ -895,6 +1057,12 @@ class TelegramPromptClient:
         """Resolve one pending prompt and acknowledge the consumed Telegram reply."""
         should_ack = False
         finalize_tasks: list[asyncio.Task[None]] = []
+        self._debug_event(
+            "telegram_prompt_resolve_start",
+            prompt_id=pending_prompt.prompt_id,
+            prompt_message_id=prompt_message_id,
+            reply_to_message_id=reply_to_message_id,
+        )
         async with self._lock:
             current_pending = self._pending_by_message_id.get(prompt_message_id)
             if (
@@ -905,6 +1073,11 @@ class TelegramPromptClient:
                 current_pending.future.set_result(agent_response)
                 finalize_tasks = self._remove_pending_prompt_locked(current_pending)
                 should_ack = True
+                self._debug_event(
+                    "telegram_prompt_future_resolved",
+                    prompt_id=pending_prompt.prompt_id,
+                    prompt_message_id=prompt_message_id,
+                )
 
         current_task = asyncio.current_task()
         for finalize_task in finalize_tasks:
@@ -912,10 +1085,44 @@ class TelegramPromptClient:
                 finalize_task.cancel()
 
         if should_ack:
-            await self._safe_send_status_message(
-                f"✅ Received [{pending_prompt.prompt_id}]",
+            self._schedule_received_ack(
+                pending_prompt.prompt_id,
                 reply_to_message_id=reply_to_message_id,
             )
+
+    def _schedule_received_ack(self, prompt_id: str, *, reply_to_message_id: Optional[int]) -> None:
+        """Send the non-critical Received status without blocking reply polling."""
+        task = asyncio.create_task(
+            self._send_received_ack(prompt_id, reply_to_message_id=reply_to_message_id)
+        )
+        self._background_status_tasks.add(task)
+        task.add_done_callback(self._background_status_tasks.discard)
+        task.add_done_callback(self._consume_task_result)
+
+    async def _send_received_ack(
+        self,
+        prompt_id: str,
+        *,
+        reply_to_message_id: Optional[int],
+    ) -> None:
+        """Send and time the best-effort Received status message."""
+        ack_started_at = time.monotonic()
+        self._debug_event(
+            "telegram_ack_send_start",
+            prompt_id=prompt_id,
+            reply_to_message_id=reply_to_message_id,
+        )
+        ack_sent = await self._safe_send_status_message(
+            f"✅ Received [{prompt_id}]",
+            reply_to_message_id=reply_to_message_id,
+        )
+        self._debug_event(
+            "telegram_ack_send_done",
+            prompt_id=prompt_id,
+            reply_to_message_id=reply_to_message_id,
+            sent=ack_sent,
+            duration_ms=duration_ms(ack_started_at),
+        )
 
     def _remove_pending_prompt_locked(
         self,
@@ -1770,7 +1977,27 @@ class TelegramPromptClient:
 
     async def _bot_api_request(self, method: str, payload: dict[str, Any], *, timeout: int) -> Any:
         """Issue a Telegram Bot API request through the standard library HTTP stack."""
-        return await asyncio.to_thread(self._bot_api_request_sync, method, payload, timeout)
+        started_at = time.monotonic()
+        self._debug_event("telegram_api_request_start", method=method, timeout_seconds=timeout)
+        try:
+            result = await asyncio.to_thread(self._bot_api_request_sync, method, payload, timeout)
+        except TelegramPromptError as exc:
+            self._debug_event(
+                "telegram_api_request_error",
+                method=method,
+                duration_ms=duration_ms(started_at),
+                error=exc,
+            )
+            raise
+
+        result_size = len(result) if isinstance(result, list) else None
+        self._debug_event(
+            "telegram_api_request_ok",
+            method=method,
+            duration_ms=duration_ms(started_at),
+            result_size=result_size,
+        )
+        return result
 
     def _bot_api_request_sync(self, method: str, payload: dict[str, Any], timeout: int) -> Any:
         """Perform a blocking Telegram Bot API request."""

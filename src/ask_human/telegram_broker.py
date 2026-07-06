@@ -18,6 +18,7 @@ from .broker_state import (
     load_or_create_broker_identity,
     persist_broker_listen_url,
 )
+from .debug_logging import TelegramDebugLogger
 from .telegram_client import TelegramPromptClient
 from .telegram_models import (
     TelegramConfig,
@@ -102,8 +103,13 @@ def create_telegram_broker_app(
     target_key: str,
     shutdown_event: Optional[asyncio.Event] = None,
     request_shutdown: Optional[Callable[[], None]] = None,
+    debug_logger: Optional[TelegramDebugLogger] = None,
 ) -> Starlette:
     """Create the broker HTTP app."""
+
+    def debug_event(event: str, **fields: Any) -> None:
+        if debug_logger is not None:
+            debug_logger.event(event, **fields)
 
     async def health(_request: Request) -> JSONResponse:
         return JSONResponse(
@@ -115,6 +121,7 @@ def create_telegram_broker_app(
         )
 
     async def prompts(request: Request) -> JSONResponse:
+        request_started_at = asyncio.get_running_loop().time()
         payload = await request.json()
         if not isinstance(payload, dict):
             return JSONResponse(
@@ -153,6 +160,12 @@ def create_telegram_broker_app(
 
         download_dir = resolve_telegram_download_dir(download_dir_raw)
         download_dir.mkdir(parents=True, exist_ok=True)
+        debug_event(
+            "broker_prompt_request_start",
+            prompt_id=prompt_id,
+            prompt_message_count=len(prompt_texts),
+            timeout_seconds=timeout_seconds,
+        )
 
         prompt_task = asyncio.create_task(
             telegram_client.ask_question(
@@ -169,16 +182,38 @@ def create_telegram_broker_app(
                 shutdown_event,
             )
         except BrokerPromptClientDisconnected as exc:
+            debug_event(
+                "broker_prompt_request_cancelled",
+                prompt_id=prompt_id,
+                duration_ms=round((asyncio.get_running_loop().time() - request_started_at) * 1000),
+                error=exc,
+            )
             return JSONResponse(
                 {"status": "cancelled", "error": str(exc)},
                 status_code=499,
             )
         except TelegramPromptError as exc:
+            debug_event(
+                "broker_prompt_request_error",
+                prompt_id=prompt_id,
+                duration_ms=round((asyncio.get_running_loop().time() - request_started_at) * 1000),
+                error=exc,
+            )
             return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
 
         if response is None:
+            debug_event(
+                "broker_prompt_request_timeout",
+                prompt_id=prompt_id,
+                duration_ms=round((asyncio.get_running_loop().time() - request_started_at) * 1000),
+            )
             return JSONResponse({"status": "timeout"})
 
+        debug_event(
+            "broker_prompt_request_ok",
+            prompt_id=prompt_id,
+            duration_ms=round((asyncio.get_running_loop().time() - request_started_at) * 1000),
+        )
         return JSONResponse({"status": "ok", "response": response})
 
     async def shutdown(_request: Request) -> JSONResponse:
@@ -240,9 +275,11 @@ def run_telegram_broker(
     state_dir: Path,
     telegram_target: TelegramConfig,
     broker_label: Optional[str] = None,
+    debug_log_path: Optional[str] = None,
 ) -> None:
     """Run the Telegram broker service and persist its local discovery info."""
     identity = load_or_create_broker_identity(state_dir, broker_label=broker_label)
+    debug_logger = TelegramDebugLogger.from_config(debug_log_path)
     server_socket = _create_bound_socket(host, port)
     target_key = resolve_telegram_target_key(telegram_target)
 
@@ -250,6 +287,15 @@ def run_telegram_broker(
         actual_port = int(server_socket.getsockname()[1])
         listen_url = build_broker_listen_url(host, actual_port)
         persist_broker_listen_url(state_dir, listen_url)
+        if debug_logger is not None:
+            debug_logger.event(
+                "broker_start",
+                broker_id=identity.broker_id,
+                broker_label=identity.broker_label,
+                listen_url=listen_url,
+                target_key=target_key,
+                version=__version__,
+            )
         shutdown_event = asyncio.Event()
         server_holder: dict[str, uvicorn.Server] = {}
 
@@ -261,6 +307,7 @@ def run_telegram_broker(
         telegram_client = TelegramPromptClient(
             telegram_target,
             broker_identity=identity,
+            debug_log_path=debug_log_path,
         )
         app = create_telegram_broker_app(
             identity,
@@ -269,6 +316,7 @@ def run_telegram_broker(
             target_key=target_key,
             shutdown_event=shutdown_event,
             request_shutdown=request_shutdown,
+            debug_logger=debug_logger,
         )
         config = uvicorn.Config(app, host=host, port=actual_port, log_level="info")
         server = uvicorn.Server(config)
@@ -281,4 +329,12 @@ def run_telegram_broker(
             # traceback after shutdown completes.
             return
     finally:
+        if debug_logger is not None:
+            debug_logger.event(
+                "broker_stop",
+                broker_id=identity.broker_id,
+                broker_label=identity.broker_label,
+                target_key=target_key,
+                version=__version__,
+            )
         server_socket.close()

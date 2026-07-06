@@ -22,6 +22,7 @@ It gives MCP-capable agents a focused tool for cases where guessing is the wrong
 - [Configuration](#configuration)
 - [Tool reference](#tool-reference)
 - [Development](#development)
+- [Troubleshooting](#troubleshooting)
 - [Security and Privacy](#security-and-privacy)
 - [License](#license)
 
@@ -604,6 +605,20 @@ Build locally:
 python -m build
 python -m twine check dist/*
 ```
+
+## Troubleshooting
+
+### Telegram delays
+
+If Telegram messages appear delayed, that may be a Telegram-side issue; see [[1]](https://github.com/openclaw/openclaw/issues/98773), [[2]](https://github.com/openclaw/openclaw/issues/91456), [[3]](https://github.com/NousResearch/hermes-agent/issues/58236), [[4]](https://statusgator.com/services/telegram).
+
+You can enable Telegram debug logging either by adding a CLI argument to your MCP config:
+
+```bash
+--telegram-debug-log "{cwd}/tmp/ask-human-telegram-debug.jsonl"
+```
+
+or by launching the broker manually with `ASK_HUMAN_TELEGRAM_DEBUG_LOG=/path/to/ask-human-telegram-debug.jsonl`. The debug log omits bot tokens, chat IDs, prompt text, and reply text.
 
 ## Security and Privacy
 

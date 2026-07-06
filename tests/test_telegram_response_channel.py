@@ -414,6 +414,84 @@ def test_telegram_client_resolves_reply_to_sent_message(monkeypatch, tmp_path):
     assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
 
 
+def test_telegram_client_ack_does_not_block_next_prompt_polling(monkeypatch, tmp_path):
+    """Keep polling for fresh replies while an earlier Received ack is still sending."""
+
+    async def run_test():
+        client = TelegramPromptClient(
+            TelegramConfig("123456:ABCDEF", "-1009876543210"),
+            tmp_path,
+        )
+        release_first_ack = asyncio.Event()
+        first_ack_started = asyncio.Event()
+        sent_messages = []
+        prompt_message_ids = iter([101, 102])
+        sent_prompt_message_ids: set[int] = set()
+        delivered_replies: set[int] = set()
+
+        async def fake_bot_api_request(method, payload, timeout):
+            if method == "sendMessage":
+                sent_messages.append(payload)
+                text = payload["text"]
+                if text == "✅ Received [QFIRST-1234]":
+                    first_ack_started.set()
+                    await release_first_ack.wait()
+                    return {"message_id": 301}
+                if text.startswith("✅ Received"):
+                    return {"message_id": 302}
+                message_id = next(prompt_message_ids)
+                sent_prompt_message_ids.add(message_id)
+                return {"message_id": message_id}
+            if method == "getUpdates":
+                if 101 not in delivered_replies:
+                    delivered_replies.add(101)
+                    return [
+                        {
+                            "update_id": 1,
+                            "message": {
+                                "message_id": 201,
+                                "chat": {"id": -1009876543210},
+                                "reply_to_message": {"message_id": 101},
+                                "text": "first answer",
+                            },
+                        }
+                    ]
+                if 102 in sent_prompt_message_ids and 102 not in delivered_replies:
+                    delivered_replies.add(102)
+                    return [
+                        {
+                            "update_id": 2,
+                            "message": {
+                                "message_id": 202,
+                                "chat": {"id": -1009876543210},
+                                "reply_to_message": {"message_id": 102},
+                                "text": "second answer",
+                            },
+                        }
+                    ]
+                return []
+            raise AssertionError(f"Unexpected method: {method}")
+
+        monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+        first_result = await client.ask_question("Prompt text", 5, "QFIRST-1234")
+        await asyncio.wait_for(first_ack_started.wait(), timeout=1)
+
+        second_result = await asyncio.wait_for(
+            client.ask_question("Prompt text", 5, "QSECOND-1234"),
+            timeout=1,
+        )
+
+        assert first_result == "first answer"
+        assert second_result == "second answer"
+        assert "✅ Received [QSECOND-1234]" in [message["text"] for message in sent_messages]
+
+        release_first_ack.set()
+        await asyncio.sleep(0)
+
+    asyncio.run(run_test())
+
+
 def test_telegram_client_includes_selected_quote_context(monkeypatch, tmp_path):
     """Include Telegram's manual selected quote in the agent-facing response."""
     client = TelegramPromptClient(
@@ -723,6 +801,139 @@ def test_telegram_client_confirms_consumed_updates_before_stopping(monkeypatch, 
         DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS,
         0,
     ]
+
+
+def test_telegram_client_does_not_overlap_slow_idle_drain_poller(monkeypatch, tmp_path):
+    """Wait for a slow no-pending confirmation poll instead of starting an overlap."""
+
+    async def run_test():
+        client = TelegramPromptClient(
+            TelegramConfig("123456:ABCDEF", "-1009876543210"),
+            tmp_path,
+        )
+        client._next_update_offset = 2
+        drain_started = asyncio.Event()
+        get_updates_payloads = []
+        active_get_updates = 0
+        max_active_get_updates = 0
+        send_count = 0
+
+        async def fake_bot_api_request(method, payload, timeout):
+            nonlocal active_get_updates, max_active_get_updates, send_count
+            if method == "sendMessage":
+                send_count += 1
+                return {"message_id": 101 if send_count == 1 else 301}
+            if method == "getUpdates":
+                active_get_updates += 1
+                max_active_get_updates = max(max_active_get_updates, active_get_updates)
+                try:
+                    get_updates_payloads.append(payload.copy())
+                    if payload["timeout"] == 0:
+                        assert timeout == client.IDLE_DRAIN_HTTP_TIMEOUT_SECONDS
+                        drain_started.set()
+                        await asyncio.sleep(0.05)
+                        return []
+                    return [
+                        {
+                            "update_id": 2,
+                            "message": {
+                                "message_id": 201,
+                                "chat": {"id": -1009876543210},
+                                "reply_to_message": {"message_id": 101},
+                                "text": "telegram answer",
+                            },
+                        }
+                    ]
+                finally:
+                    active_get_updates -= 1
+            raise AssertionError(f"Unexpected method: {method}")
+
+        monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+        async with client._lock:
+            client._ensure_poller_locked()
+        await asyncio.wait_for(drain_started.wait(), timeout=1)
+
+        result = await asyncio.wait_for(
+            client.ask_question("Prompt text", 5, "QTEST-1234"),
+            timeout=1,
+        )
+
+        assert result == "telegram answer"
+        assert max_active_get_updates == 1
+        assert [payload["timeout"] for payload in get_updates_payloads[:2]] == [
+            0,
+            DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS,
+        ]
+
+    asyncio.run(run_test())
+
+
+def test_telegram_client_recovers_when_idle_drain_times_out(monkeypatch, tmp_path):
+    """Do not fail a fresh prompt when an older no-pending drain request times out."""
+
+    async def run_test():
+        client = TelegramPromptClient(
+            TelegramConfig("123456:ABCDEF", "-1009876543210"),
+            tmp_path,
+        )
+        client._next_update_offset = 2
+        drain_started = asyncio.Event()
+        prompt_sent = asyncio.Event()
+        release_drain = asyncio.Event()
+        get_updates_payloads = []
+        send_count = 0
+
+        async def fake_bot_api_request(method, payload, timeout):
+            nonlocal send_count
+            if method == "sendMessage":
+                send_count += 1
+                if send_count == 1:
+                    prompt_sent.set()
+                return {"message_id": 101 if send_count == 1 else 301}
+            if method == "getUpdates":
+                get_updates_payloads.append(payload.copy())
+                if payload["timeout"] == 0:
+                    assert timeout == client.IDLE_DRAIN_HTTP_TIMEOUT_SECONDS
+                    drain_started.set()
+                    await release_drain.wait()
+                    raise TelegramBotApiError(
+                        "Telegram getUpdates request failed: timed out",
+                        method="getUpdates",
+                        transport_error=True,
+                    )
+                return [
+                    {
+                        "update_id": 2,
+                        "message": {
+                            "message_id": 201,
+                            "chat": {"id": -1009876543210},
+                            "reply_to_message": {"message_id": 101},
+                            "text": "telegram answer",
+                        },
+                    }
+                ]
+            raise AssertionError(f"Unexpected method: {method}")
+
+        monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+        async with client._lock:
+            client._ensure_poller_locked()
+        await asyncio.wait_for(drain_started.wait(), timeout=1)
+
+        question_task = asyncio.create_task(client.ask_question("Prompt text", 5, "QTEST-1234"))
+        await asyncio.wait_for(prompt_sent.wait(), timeout=1)
+        release_drain.set()
+
+        result = await asyncio.wait_for(question_task, timeout=1)
+
+        assert result == "telegram answer"
+        assert [payload["timeout"] for payload in get_updates_payloads[:2]] == [
+            0,
+            DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS,
+        ]
+
+    asyncio.run(run_test())
 
 
 def test_telegram_client_ignores_backlog_updates_before_prompt_message(monkeypatch, tmp_path):

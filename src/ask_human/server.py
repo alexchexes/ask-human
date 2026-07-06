@@ -488,6 +488,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--telegram-debug-log",
+        default=None,
+        help=(
+            "Optional JSONL file for Telegram timing diagnostics. Can also be set with "
+            "ASK_HUMAN_TELEGRAM_DEBUG_LOG. Does not log bot tokens, chat ids, prompt text, "
+            "or reply text. Supports ~, environment variables, and {cwd}."
+        ),
+    )
+    parser.add_argument(
         "--telegram-broker-host",
         default="127.0.0.1",
         help="Host to bind to when running in --telegram-broker mode.",
@@ -522,6 +531,7 @@ def main() -> None:
             state_dir=broker_state_dir,
             telegram_target=telegram_target,
             broker_label=args.telegram_broker_label,
+            debug_log_path=args.telegram_debug_log,
         )
         return
 
@@ -556,6 +566,7 @@ def main() -> None:
             telegram_download_dir,
             broker_state_root=resolve_broker_state_dir(args.telegram_broker_root_state_dir),
             broker_label=args.telegram_broker_label,
+            debug_log_path=args.telegram_debug_log,
         )
         if telegram_target is not None
         else None

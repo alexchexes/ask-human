@@ -19,6 +19,7 @@ from .broker_state import (
     resolve_broker_state_dir,
     resolve_target_broker_state_dir,
 )
+from .debug_logging import TelegramDebugLogger
 from .prompt_formatting import build_telegram_prompt_text, build_telegram_prompt_texts
 from .telegram_models import (
     DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS,
@@ -39,11 +40,14 @@ class TelegramBrokerClient:
         *,
         broker_state_root: Optional[Path] = None,
         broker_label: Optional[str] = None,
+        debug_log_path: Optional[str] = None,
     ) -> None:
         self.telegram_target = telegram_target
         self.download_dir = download_dir.resolve()
         self.broker_state_root = (broker_state_root or resolve_broker_state_dir()).resolve()
         self.broker_label = broker_label
+        self.debug_log_path = debug_log_path
+        self.debug_logger = TelegramDebugLogger.from_config(debug_log_path)
         self.target_state_dir = resolve_target_broker_state_dir(
             self.broker_state_root,
             telegram_target,
@@ -60,7 +64,17 @@ class TelegramBrokerClient:
         issued_at: dt.datetime,
     ) -> Optional[str]:
         """Ensure a local broker exists, then forward one Telegram prompt through it."""
+        self._debug_event("broker_client_prompt_start", prompt_id=prompt_id)
         broker_health = await self._ensure_local_broker()
+        self._debug_event(
+            "broker_client_health_ready",
+            prompt_id=prompt_id,
+            listen_url=broker_health.listen_url,
+            broker_id=broker_health.broker_id,
+            broker_label=broker_health.broker_label,
+            target_key=broker_health.target_key,
+            version=broker_health.version,
+        )
         telegram_issued_at = dt.datetime.now().astimezone() if include_timing_info else issued_at
         prompt_text = build_telegram_prompt_text(
             question,
@@ -95,6 +109,11 @@ class TelegramBrokerClient:
             },
             timeout=timeout_seconds + 30,
         )
+        self._debug_event(
+            "broker_client_prompt_response",
+            prompt_id=prompt_id,
+            status=response.get("status"),
+        )
 
         status = response.get("status")
         if status == "ok":
@@ -108,6 +127,10 @@ class TelegramBrokerClient:
 
         error_text = response.get("error", "unknown broker error")
         raise TelegramPromptError(f"Broker prompt failed: {error_text}")
+
+    def _debug_event(self, event: str, **fields: Any) -> None:
+        if self.debug_logger is not None:
+            self.debug_logger.event(event, **fields)
 
     async def _ensure_local_broker(self) -> TelegramBrokerHealth:
         """Reuse a healthy broker for this target, or start one if needed."""
@@ -194,6 +217,8 @@ class TelegramBrokerClient:
         ]
         if self.broker_label:
             command.extend(["--telegram-broker-label", self.broker_label])
+        if self.debug_log_path:
+            command.extend(["--telegram-debug-log", self.debug_log_path])
 
         creation_flags = 0
         if hasattr(subprocess, "CREATE_NO_WINDOW"):
@@ -270,14 +295,43 @@ class TelegramBrokerClient:
         method: str = "POST",
     ) -> dict[str, Any]:
         """Issue one broker HTTP request and decode the JSON response."""
-        return await asyncio.to_thread(
-            self._broker_request_sync,
-            listen_url,
-            path,
-            payload,
-            timeout,
-            method,
+        started_at = asyncio.get_running_loop().time()
+        self._debug_event(
+            "broker_client_request_start",
+            path=path,
+            method=method,
+            listen_url=listen_url,
+            timeout_seconds=timeout,
         )
+        try:
+            response = await asyncio.to_thread(
+                self._broker_request_sync,
+                listen_url,
+                path,
+                payload,
+                timeout,
+                method,
+            )
+        except TelegramPromptError as exc:
+            self._debug_event(
+                "broker_client_request_error",
+                path=path,
+                method=method,
+                listen_url=listen_url,
+                duration_ms=round((asyncio.get_running_loop().time() - started_at) * 1000),
+                error=exc,
+            )
+            raise
+
+        self._debug_event(
+            "broker_client_request_ok",
+            path=path,
+            method=method,
+            listen_url=listen_url,
+            status=response.get("status"),
+            duration_ms=round((asyncio.get_running_loop().time() - started_at) * 1000),
+        )
+        return response
 
     def _broker_request_sync(
         self,

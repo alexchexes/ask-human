@@ -179,6 +179,32 @@ def test_broker_client_waits_for_started_broker(monkeypatch, tmp_path):
     assert calls["replace_mismatched"] == [False, True]
 
 
+def test_broker_client_passes_debug_log_to_spawned_broker(monkeypatch, tmp_path):
+    """Forward Telegram debug logging to an auto-started broker process."""
+    client = TelegramBrokerClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path / "downloads",
+        broker_state_root=tmp_path / "state",
+        debug_log_path=str(tmp_path / "telegram-debug.jsonl"),
+    )
+    captured = {}
+
+    class FakePopen:
+        def __init__(self, command, **kwargs):
+            captured["command"] = command
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr("ask_human.telegram_broker_client.subprocess.Popen", FakePopen)
+
+    client._spawn_local_broker()
+
+    command = captured["command"]
+    assert "--telegram-debug-log" in command
+    assert command[command.index("--telegram-debug-log") + 1] == str(
+        tmp_path / "telegram-debug.jsonl"
+    )
+
+
 def test_broker_client_shuts_down_version_mismatched_broker(monkeypatch, tmp_path):
     """Replace a broker from another package version before sending prompts."""
     telegram_target = TelegramConfig("123456:ABCDEF", "-1009876543210")
