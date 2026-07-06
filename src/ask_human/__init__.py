@@ -1,6 +1,6 @@
 """Ask Human MCP server."""
 
-__version__ = "0.3.6"
+__version__ = "0.3.7"
 
 from .server import main
 
