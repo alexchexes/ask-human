@@ -102,6 +102,28 @@ command: ask-human
 args: --transport stdio
 ```
 
+### Updating
+
+If your MCP config uses `uvx` for `ask-human`, there is no persistent install to upgrade. `uvx` resolves the package when it runs and reuses a cached environment; to force that cache to refresh to the latest published version, run:
+
+```bash
+uvx --upgrade ask-human --help
+```
+
+If you installed Ask Human persistently with `pipx`, run:
+
+```bash
+pipx upgrade ask-human
+```
+
+If you installed it with `pip --user`, run:
+
+```bash
+python -m pip install --upgrade --user ask-human
+```
+
+After updating, restart any active MCP client sessions so they launch the new Ask Human process.
+
 ## MCP client setup
 
 Codex, Claude Code, Cursor, and other MCP-capable agent clients can use Ask Human by adding the MCP server to their config.
