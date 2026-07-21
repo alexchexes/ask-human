@@ -389,6 +389,7 @@ Telegram reply behavior:
 
 - use Telegram's Reply feature on the bot's question message
 - if you select part of the bot message before replying, that selected quote is included in the agent-facing response
+- formatting in regular text replies, attachment captions, and selected quotes is restored on a best-effort basis as readable Markdown-like notation for the agent; underline uses `<u>...</u>` and spoilers use `<telegram-spoiler>...</telegram-spoiler>`
 - long text replies that Telegram splits into multiple reply messages are recombined when the split parts still reply to the same bot message
 - albums/media groups are combined into one agent-facing response
 - short bursts of ungrouped file/media replies are combined too, so multiple screenshots or documents can be sent even when Telegram's `Group items` option is disabled
@@ -403,6 +404,9 @@ Telegram reply behavior:
 - replies that appear intended for another broker instance trigger a warning instead of being silently misrouted
 - transient Telegram polling transport failures and HTTP 5xx responses are retried briefly with backoff; persistent polling failures are returned to the agent as prompt errors
 - Telegram delivery failures for the initial question or retry/warning messages are returned to the agent as prompt errors
+
+Replies created with Telegram's Premium Rich Text Editor are not supported yet. The bot asks you to
+retry with regular text or a supported attachment.
 
 Optional command menu: in `@BotFather`, run `/setcommands`, pick your bot, and send:
 

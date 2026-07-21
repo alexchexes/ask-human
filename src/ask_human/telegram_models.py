@@ -63,13 +63,22 @@ class TelegramPromptError(Exception):
 
 
 @dataclass
+class TelegramTextReplyPart:
+    """Rendered split-reply text plus its original whitespace boundaries."""
+
+    text: str
+    source_starts_with_whitespace: bool
+    source_ends_with_whitespace: bool
+
+
+@dataclass
 class TelegramPendingPrompt:
     """Track one sent Telegram prompt until a valid reply arrives."""
 
     future: asyncio.Future[str]
     prompt_id: str
     download_dir: Path
-    text_reply_parts: list[str] = field(default_factory=list)
+    text_reply_parts: list[TelegramTextReplyPart] = field(default_factory=list)
     selected_quote_text: Optional[str] = None
     text_reply_ack_message_id: Optional[int] = None
     text_reply_finalize_task: Optional[asyncio.Task[None]] = None

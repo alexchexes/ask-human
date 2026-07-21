@@ -20,6 +20,7 @@ from ask_human.telegram_models import (
     DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS,
     TelegramConfig,
     TelegramPromptError,
+    TelegramReplyRejection,
     parse_telegram_target,
 )
 
@@ -38,6 +39,32 @@ def test_parse_telegram_target_rejects_invalid_shape():
     """Reject telegram target values without both pieces."""
     with pytest.raises(ValueError):
         parse_telegram_target("123456:ABCDEF")
+
+
+def test_telegram_client_rejects_rich_message_until_supported(tmp_path):
+    """Keep Telegram's separate rich-message format outside the initial entity scope."""
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+
+    resolution = asyncio.run(
+        client._build_reply_resolution(
+            {
+                "message_id": 210,
+                "rich_message": {
+                    "blocks": [
+                        {"type": "paragraph", "text": "Rich editor response"},
+                    ]
+                },
+            },
+            "QTEST-1234",
+            download_dir=tmp_path,
+        )
+    )
+
+    assert isinstance(resolution, TelegramReplyRejection)
+    assert "Unsupported reply for [QTEST-1234]" in resolution.user_message
 
 
 def test_telegram_client_shutdown_waits_for_poller_to_stop(tmp_path):
@@ -442,6 +469,7 @@ def test_telegram_client_resolves_reply_to_sent_message(monkeypatch, tmp_path):
                     "chat": {"id": -1009876543210},
                     "reply_to_message": {"message_id": 101},
                     "text": "telegram answer",
+                    "entities": [{"type": "code", "offset": 9, "length": 6}],
                 },
             }
         ],
@@ -463,7 +491,7 @@ def test_telegram_client_resolves_reply_to_sent_message(monkeypatch, tmp_path):
 
     result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
 
-    assert result == "telegram answer"
+    assert result == "telegram `answer`"
     assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
 
 
@@ -561,6 +589,7 @@ def test_telegram_client_includes_selected_quote_context(monkeypatch, tmp_path):
                     "reply_to_message": {"message_id": 101},
                     "quote": {
                         "text": "selected prompt phrase",
+                        "entities": [{"type": "bold", "offset": 0, "length": 8}],
                         "position": 14,
                         "is_manual": True,
                     },
@@ -588,7 +617,7 @@ def test_telegram_client_includes_selected_quote_context(monkeypatch, tmp_path):
 
     assert result == (
         "User quoted your prompt:\n"
-        "selected prompt phrase\n"
+        "**selected** prompt phrase\n"
         "\n"
         "User reply:\n"
         "telegram answer"
@@ -757,6 +786,58 @@ def test_telegram_client_separates_split_text_replies_without_boundary_whitespac
     result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
 
     assert result == "first sentence.\nSecond"
+
+
+def test_telegram_client_uses_source_whitespace_when_formatted_split_parts_hide_it(
+    monkeypatch,
+    tmp_path,
+):
+    """Do not add a newline when entity markers obscure source boundary whitespace."""
+    monkeypatch.setattr(TelegramPromptClient, "TEXT_REPLY_SPLIT_MIN_LENGTH", 6)
+    monkeypatch.setattr(TelegramPromptClient, "TEXT_REPLY_SPLIT_DEBOUNCE_SECONDS", 0.01)
+    client = TelegramPromptClient(
+        TelegramConfig("123456:ABCDEF", "-1009876543210"),
+        tmp_path,
+    )
+    updates = [
+        [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 201,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": "alpha ",
+                    "entities": [{"type": "bold", "offset": 0, "length": 6}],
+                },
+            },
+            {
+                "update_id": 2,
+                "message": {
+                    "message_id": 202,
+                    "chat": {"id": -1009876543210},
+                    "reply_to_message": {"message_id": 101},
+                    "text": "beta",
+                },
+            },
+        ],
+        [],
+    ]
+
+    async def fake_bot_api_request(method, payload, timeout):
+        if method == "sendMessage":
+            if "parse_mode" in payload:
+                return {"message_id": 101}
+            return {"message_id": 301}
+        if method == "getUpdates":
+            return updates.pop(0) if updates else []
+        raise AssertionError(f"Unexpected method: {method}")
+
+    monkeypatch.setattr(client, "_bot_api_request", fake_bot_api_request)
+
+    result = asyncio.run(client.ask_question("Prompt text", 5, "QTEST-1234"))
+
+    assert result == "**alpha **beta"
 
 
 def test_telegram_client_combines_split_text_replies_across_update_pages(
@@ -1143,6 +1224,7 @@ def test_telegram_client_formats_file_reply_as_user_attachment(monkeypatch, tmp_
                     "chat": {"id": -1009876543210},
                     "reply_to_message": {"message_id": 101},
                     "caption": "please inspect this",
+                    "caption_entities": [{"type": "code", "offset": 7, "length": 7}],
                     "document": {
                         "file_id": "file-ok",
                         "file_size": 1024,
@@ -1177,7 +1259,7 @@ def test_telegram_client_formats_file_reply_as_user_attachment(monkeypatch, tmp_
     expected_path = (tmp_path / "QTEST-1234" / "report.txt").resolve()
     assert result == (
         "[telegram document reply]\n"
-        "Caption: please inspect this\n"
+        "Caption:\nplease `inspect` this\n"
         f"User attached file: {expected_path}"
     )
 
@@ -1247,7 +1329,7 @@ def test_telegram_client_combines_media_group_photos(monkeypatch, tmp_path):
         f"User attached file: {expected_path_1}\n\n"
         "Item 2/2:\n"
         "[telegram photo reply]\n"
-        "Caption: second caption\n"
+        "Caption:\nsecond caption\n"
         f"User attached file: {expected_path_2}"
     )
     assert sent_messages[-1]["text"] == "✅ Received [QTEST-1234]"
@@ -1325,7 +1407,7 @@ def test_telegram_client_combines_ungrouped_attachment_burst(monkeypatch, tmp_pa
         f"User attached file: {expected_path_1}\n\n"
         "Item 2/2:\n"
         "[telegram document reply]\n"
-        "Caption: same visible filename\n"
+        "Caption:\nsame visible filename\n"
         f"User attached file: {expected_path_2}\n"
         "Original file name: report.txt"
     )

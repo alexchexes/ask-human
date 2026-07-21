@@ -16,6 +16,7 @@ from typing import Any, Optional, cast
 from .broker_state import TelegramBrokerIdentity
 from .debug_logging import TelegramDebugLogger, duration_ms
 from .prompt_formatting import TELEGRAM_DOWNLOAD_LIMIT_LABEL, telegram_html_to_plain_text
+from .telegram_entities import telegram_entities_to_markdown
 from .telegram_models import (
     DEFAULT_TELEGRAM_POLL_TIMEOUT_SECONDS,
     TELEGRAM_DOWNLOAD_LIMIT_BYTES,
@@ -24,6 +25,7 @@ from .telegram_models import (
     TelegramPromptError,
     TelegramReplyRejection,
     TelegramReplyResolution,
+    TelegramTextReplyPart,
 )
 
 
@@ -556,7 +558,8 @@ class TelegramPromptClient:
             await self._handle_text_reply(
                 prompt_message_id,
                 pending_prompt,
-                response_text,
+                telegram_entities_to_markdown(response_text, message.get("entities")),
+                source_text=response_text,
                 selected_quote_text=selected_quote_text,
                 reply_to_message_id=reply_to_user_message_id,
             )
@@ -601,11 +604,12 @@ class TelegramPromptClient:
         pending_prompt: TelegramPendingPrompt,
         response_text: str,
         *,
+        source_text: str,
         selected_quote_text: Optional[str],
         reply_to_message_id: Optional[int],
     ) -> None:
         """Resolve a text reply, collecting likely Telegram-split follow-up parts."""
-        should_wait_for_split_part = len(response_text) >= self.TEXT_REPLY_SPLIT_MIN_LENGTH
+        should_wait_for_split_part = len(source_text) >= self.TEXT_REPLY_SPLIT_MIN_LENGTH
         should_resolve_now = False
         async with self._lock:
             current_pending = self._pending_by_message_id.get(prompt_message_id)
@@ -616,7 +620,13 @@ class TelegramPromptClient:
             ):
                 return
 
-            current_pending.text_reply_parts.append(response_text)
+            current_pending.text_reply_parts.append(
+                TelegramTextReplyPart(
+                    text=response_text,
+                    source_starts_with_whitespace=source_text[0].isspace(),
+                    source_ends_with_whitespace=source_text[-1].isspace(),
+                )
+            )
             if selected_quote_text is not None and current_pending.selected_quote_text is None:
                 current_pending.selected_quote_text = selected_quote_text
             current_pending.text_reply_ack_message_id = reply_to_message_id
@@ -1012,17 +1022,21 @@ class TelegramPromptClient:
         )
 
     @staticmethod
-    def _combine_text_reply_parts(parts: list[str]) -> str:
+    def _combine_text_reply_parts(parts: list[TelegramTextReplyPart]) -> str:
         """Combine Telegram-split text replies while avoiding glued boundaries."""
         if not parts:
             return ""
 
-        combined_parts = [parts[0]]
-        for part in parts[1:]:
-            previous = combined_parts[-1]
-            if previous and part and not previous[-1].isspace() and not part[0].isspace():
+        combined_parts = [parts[0].text]
+        for previous, part in zip(parts, parts[1:]):
+            if (
+                previous.text
+                and part.text
+                and not previous.source_ends_with_whitespace
+                and not part.source_starts_with_whitespace
+            ):
                 combined_parts.append("\n")
-            combined_parts.append(part)
+            combined_parts.append(part.text)
 
         return "".join(combined_parts)
 
@@ -1293,9 +1307,16 @@ class TelegramPromptClient:
 
         response_text = message.get("text")
         if isinstance(response_text, str) and response_text.strip():
-            return TelegramReplyResolution(response_text.strip())
+            return TelegramReplyResolution(
+                telegram_entities_to_markdown(response_text, message.get("entities")).strip()
+            )
 
-        caption = self._clean_optional_text(message.get("caption"))
+        caption_text = message.get("caption")
+        caption = (
+            telegram_entities_to_markdown(caption_text, message.get("caption_entities")).strip()
+            if isinstance(caption_text, str) and caption_text.strip()
+            else None
+        )
         reply_message_id = self._extract_message_id(message)
 
         if isinstance(message.get("document"), dict):
@@ -1581,7 +1602,7 @@ class TelegramPromptClient:
         if maybe_unintended:
             lines.append("Note: this may be unintended unless explicitly expected.")
         if caption:
-            lines.append(f"Caption: {caption}")
+            lines.append(f"Caption:\n{caption}")
         lines.append(f"User attached file: {saved_path}")
         if original_file_name and Path(saved_path).name != original_file_name:
             lines.append(f"Original file name: {original_file_name}")
@@ -1734,7 +1755,9 @@ class TelegramPromptClient:
         if not isinstance(quote_text, str):
             return None
 
-        cleaned_quote_text = quote_text.strip()
+        cleaned_quote_text = telegram_entities_to_markdown(
+            quote_text, quote.get("entities")
+        ).strip()
         return cleaned_quote_text or None
 
     async def _message_predates_latest_prompt(self, message: dict[str, Any]) -> bool:
