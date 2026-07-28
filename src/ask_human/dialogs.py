@@ -162,11 +162,13 @@ class GUIDialogHandler:
             icon_clause = "with icon caution"
 
         script = f"""
-        display dialog "{self._escape_for_applescript(question)}" ¬
+        set dialog_result to display dialog "{self._escape_for_applescript(question)}" ¬
         default answer "" ¬
         with title "{self._escape_for_applescript(self.dialog_title)}" ¬
         {icon_clause} ¬
         giving up after {timeout}
+        if gave up of dialog_result then error number -128
+        return text returned of dialog_result
         """
 
         try:
@@ -185,16 +187,7 @@ class GUIDialogHandler:
                 return None
 
             if process.returncode == 0:
-                output = stdout.decode().strip()
-                if "text returned:" in output:
-                    text_part = output.split("text returned:")[1]
-                    if ", " in text_part:
-                        return text_part.split(", ")[0].strip()
-                    return text_part.strip()
-                if "gave up:true" in output:
-                    return None
-                if "button returned:" in output and "text returned:" not in output:
-                    return ""
+                return stdout.decode().strip()
             return None
         except Exception:
             return None
