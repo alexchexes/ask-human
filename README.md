@@ -605,12 +605,10 @@ Requires Python 3.10+, and also:
 - Linux: `zenity`
 - Windows: `tkinter`
 
-Install for development:
+Install for development with the repository-pinned uv version and dependency lock:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
+uv sync --locked --all-extras
 ```
 
 When changing Telegram broker/client code during local development, stop any running local Telegram broker before retesting. Otherwise the detached broker may keep running old code from before your edit. See [How Telegram broker works](#how-telegram-broker-works) for the Windows stop command.
@@ -618,19 +616,23 @@ When changing Telegram broker/client code during local development, stop any run
 Run checks:
 
 ```bash
-black --check .
-isort --check-only .
-mypy src
-pyright
-pytest
+uv run --locked black --check .
+uv run --locked isort --check-only .
+uv run --locked mypy src
+uv run --locked pyright
+uv run --locked pytest
 ```
 
 Build locally:
 
 ```bash
-python -m build
-python -m twine check dist/*
+uv run --locked python -m build
+uv run --locked python -m twine check dist/*
 ```
+
+`pyproject.toml` requires the exact uv version used by CI. Locked commands fail instead of
+silently changing `uv.lock`. To update a dependency intentionally, edit its reviewed bounds
+in `pyproject.toml`, then run `uv lock --upgrade-package <package>`.
 
 ## Troubleshooting
 

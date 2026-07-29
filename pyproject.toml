@@ -1,5 +1,7 @@
 [build-system]
-requires = ["hatchling"]
+requires = [
+    "hatchling==1.31.0",
+]
 build-backend = "hatchling.build"
 
 [project]
@@ -9,7 +11,7 @@ description = "MCP server that lets AI agents ask the user for input via Telegra
 authors = [{name = "Alex Che", email = "alex.chexes@gmail.com"}]
 license = {text = "MIT"}
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<4"
 keywords = ["mcp", "human-in-the-loop", "telegram", "ai-assistant", "agents", "ai-agents", "agentic-ai", "codex", "claude", "claude-code", "cursor", "gui", "dialog"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -26,22 +28,22 @@ classifiers = [
 ]
 
 dependencies = [
-    "markdown-it-py>=4.0.0",
-    "mcp>=1.23.0",
-    "python-multipart>=0.0.27",
-    "starlette>=1.0.1",
-    "uvicorn",
+    "markdown-it-py>=4.0.0,<5",
+    "mcp>=1.23.0,<2",
+    "python-multipart>=0.0.27,<0.1",
+    "starlette>=1.0.1,<2",
+    "uvicorn>=0.49.0,<0.50",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "build>=1.2",
-    "pytest>=8.3.5",
-    "black>=22.0.0",
-    "isort>=5.0.0",
-    "mypy>=1.0.0",
-    "pyright>=1.1.405",
-    "twine>=5.0",
+    "build>=1.5.0,<2",
+    "pytest>=9.0.0,<10",
+    "black>=26.5.1,<27",
+    "isort>=8.0.1,<9",
+    "mypy>=2.1.0,<3",
+    "pyright>=1.1.405,<2",
+    "twine>=6.2.0,<7",
 ]
 
 [project.urls]
@@ -71,14 +73,17 @@ disallow_untyped_defs = true
 
 [dependency-groups]
 dev = [
-    "build>=1.2",
-    "pytest>=8.3.5",
-    "black>=22.0.0",
-    "isort>=5.0.0",
-    "mypy>=1.0.0",
-    "pyright>=1.1.405",
-    "twine>=5.0",
+    "build>=1.5.0,<2",
+    "pytest>=9.0.0,<10",
+    "black>=26.5.1,<27",
+    "isort>=8.0.1,<9",
+    "mypy>=2.1.0,<3",
+    "pyright>=1.1.405,<2",
+    "twine>=6.2.0,<7",
 ]
+
+[tool.uv]
+required-version = "==0.11.25"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
